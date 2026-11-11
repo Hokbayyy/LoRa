@@ -1,166 +1,87 @@
-import asyncio
-import sqlite3
-import json
-import struct
-import time
-import os
 import serial
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-import uvicorn
+import time
 
-# ==================== KONFIGURASI SYSTEM ====================
-DB_NAME = "telemetry_data.db"
-SERIAL_PORT = '/dev/ttyAMA0' # Gunakan '/dev/ttyUSB0' jika menggunakan USB-to-TTL
+SERIAL_PORT = '/dev/ttyAMA0'  # Gunakan /dev/ttyUSB0 jika memakai USB-to-TTL
 BAUDRATE = 115200
 
-app = FastAPI()
+def send_at(ser, cmd, delay=0.3):
+    ser.write((cmd + '\r\n').encode('utf-8'))
+    time.sleep(delay)
+    return ser.read_all().decode('utf-8', errors='ignore').strip()
 
-# ==================== DATABASE SQLITE HANDLER ====================
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS lora_telemetry (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            node_id INTEGER NOT NULL,
-            rssi REAL NOT NULL,
-            snr REAL NOT NULL,
-            parameters TEXT NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    print("✅ [DB] SQLite Database lokal terinisialisasi!")
-
-def save_to_sqlite(node_id: int, rssi: float, snr: float, params: list):
-    """Menyimpan data lengkap termasuk RSSI & SNR ke SQLite."""
+def check_and_setup_rx():
     try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        params_json = json.dumps(params)
-        cursor.execute('''
-            INSERT INTO lora_telemetry (node_id, rssi, snr, parameters)
-            VALUES (?, ?, ?, ?)
-        ''', (node_id, rssi, snr, params_json))
-        conn.commit()
-        conn.close()
+        ser = serial.Serial(SERIAL_PORT, baudrate=BAUDRATE, timeout=1)
+        print(f"==================================================")
+        print(f"🔍 MEMERIKSA STATUS RAK3272S RECEIVER ({SERIAL_PORT})...")
+        print(f"==================================================")
+        
+        # 1. Tes Komunikasi AT Sederhana
+        res_at = send_at(ser, "AT")
+        if "OK" not in res_at:
+            print("❌ ERROR: RAK3272S tidak merespon perintah AT!")
+            print("👉 Periksa: Kabel TX/RX terbalik? Baudrate salah? Atau port serial belum diizinkan?")
+            return None
+        print("✅ 1. Komunikasi Serial OK (RAK3272S Terhubung)")
+
+        # 2. Set & Cek Mode P2P
+        send_at(ser, "AT+NWM=0") # Set Mode P2P
+        res_nwm = send_at(ser, "AT+NWM=?")
+        print(f"✅ 2. Mode Kerja Saat Ini : {res_nwm}")
+
+        # 3. Set & Cek Parameter Radio P2P
+        # Freq: 923.2MHz, SF: 7, BW: 125kHz, CR: 4/5, Preamble: 8, Power: 20dBm
+        send_at(ser, "AT+P2P=923200000:7:0:0:8:20")
+        res_p2p = send_at(ser, "AT+P2P=?")
+        print(f"✅ 3. Parameter P2P Radio : {res_p2p}")
+
+        # 4. Aktifkan Mode Receiver Continuous (PRECV)
+        res_precv = send_at(ser, "AT+PRECV=65535")
+        print(f"✅ 4. Status Listening RX  : {res_precv}")
+        
+        print(f"==================================================")
+        print(f"📡 RAK3272S RX SIAP & MENDENGARKAN SINYAL RADIO...")
+        print(f"Menunggu data masuk dari Node TX... (Tekan Ctrl+C untuk berhenti)\n")
+        return ser
+
     except Exception as e:
-        print(f"❌ [DB ERROR] Gagal menyimpan ke SQLite: {e}")
+        print(f"❌ Error muka serial: {e}")
+        return None
 
-# ==================== WEBSOCKET BROADCASTER ====================
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_json(message)
-            except Exception:
-                self.disconnect(connection)
-
-manager = ConnectionManager()
-
-# ==================== LORA RX WORKER TASK ====================
-async def lora_rx_worker():
-    loop = asyncio.get_event_loop()
-    
-    try:
-        ser = serial.Serial(SERIAL_PORT, baudrate=BAUDRATE, timeout=0.1)
-    except Exception as e:
-        print(f"❌ [FATAL] Gagal membuka port serial RX: {e}")
+def main():
+    ser = check_and_setup_rx()
+    if not ser:
         return
 
-    # Set Up Mode RX Continuous
-    ser.write(b"AT+NWM=0\r\n")
-    await asyncio.sleep(0.2)
-    ser.write(b"AT+P2P=923200000:7:0:0:8:20\r\n")
-    await asyncio.sleep(0.2)
-    ser.write(b"AT+PRECV=65535\r\n")
-    await asyncio.sleep(0.2)
-    print("📡 [RX GATEWAY] RAK3272S Listening Mode Active (SF7 P2P)...")
-
     buffer = ""
-    fmt = '<B120H'
-    expected_bytes = struct.calcsize(fmt) # 241 Byte
-
     while True:
-        if ser.in_waiting > 0:
-            data = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
-            buffer += data
-            
-            while '\r\n' in buffer:
-                line, buffer = buffer.split('\r\n', 1)
-                line = line.strip()
+        try:
+            if ser.in_waiting > 0:
+                data = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                buffer += data
                 
-                # Format: +EVT:RXP2P:<RSSI>:<SNR>:<HEX_PAYLOAD>
-                if "+EVT:RXP2P" in line:
-                    parts = line.split(":")
-                    if len(parts) >= 5:
-                        try:
-                            rssi = float(parts[2])
-                            snr = float(parts[3])
-                            hex_payload = parts[4]
+                while '\r\n' in buffer:
+                    line, buffer = buffer.split('\r\n', 1)
+                    line = line.strip()
+                    
+                    if line:
+                        timestamp = time.strftime('%H:%M:%S')
+                        # Indikator Jika Sinyal Radio Masuk
+                        if "+EVT:RXP2P" in line:
+                            print(f"\n🎉 [{timestamp}] SINYAL DITERIMA!")
+                            print(f"   Raw Event Data : {line}")
+                            parts = line.split(":")
+                            if len(parts) >= 5:
+                                print(f"   --> RSSI : {parts[2]} dBm")
+                                print(f"   --> SNR  : {parts[3]} dB")
+                                print(f"   --> Payload Hex ({len(parts[4])//2} Byte) : {parts[4][:30]}...")
+                        else:
+                            print(f"[{timestamp}] [RAK LOG]: {line}")
                             
-                            raw_bytes = bytes.fromhex(hex_payload)
-                            
-                            if len(raw_bytes) == expected_bytes:
-                                # Unpack 1 Byte Node ID + 120 uint16
-                                unpacked = struct.unpack(fmt, raw_bytes)
-                                node_id = unpacked[0]
-                                params = [round(val / 100.0, 2) for val in unpacked[1:]]
-                                timestamp_str = time.strftime('%H:%M:%S')
-                                
-                                print(f"[{timestamp_str}] RX Success | Node: {node_id} | RSSI: {rssi} dBm | SNR: {snr} dB (Saved to SQLite)")
-                                
-                                # 1. SIMPAN KE SQLITE (Termasuk RSSI & SNR)
-                                await loop.run_in_executor(None, save_to_sqlite, node_id, rssi, snr, params)
-                                
-                                # 2. BROADCAST KE WEB (Fokus 120 Parameter tanpa RSSI/SNR)
-                                ws_payload = {
-                                    "timestamp": timestamp_str,
-                                    "node_id": node_id,
-                                    "parameters": params
-                                }
-                                await manager.broadcast(ws_payload)
-                            else:
-                                print(f"⚠️ Ukuran payload tidak cocok: {len(raw_bytes)} byte.")
-                        except Exception as parse_err:
-                            print(f"⚠️ Parsing Error: {parse_err}")
-
-        await asyncio.sleep(0.01)
-
-# ==================== FASTAPI ENDPOINTS ====================
-@app.on_event("startup")
-async def startup_event():
-    init_db()
-    asyncio.create_task(lora_rx_worker())
-
-@app.get("/")
-async def get_dashboard():
-    if os.path.exists("templates/index.html"):
-        with open("templates/index.html", "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h2>templates/index.html tidak ditemukan!</h2>", status_code=404)
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+            time.sleep(0.01)
+        except KeyboardInterrupt:
+            print("\n[RX TEST] Dihentikan oleh pengguna.")
+            break
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()

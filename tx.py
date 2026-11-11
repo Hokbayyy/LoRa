@@ -1,87 +1,89 @@
 import serial
 import time
 import struct
-import random
 
-# ==================== KONFIGURASI NODE ====================
-NODE_ID = 1                 # Ubah menjadi 2 untuk Node TX Kedua
-SERIAL_PORT = '/dev/ttyAMA0' # Gunakan '/dev/ttyUSB0' jika memakai USB-to-TTL
+SERIAL_PORT = '/dev/ttyAMA0'  # Gunakan /dev/ttyUSB0 jika memakai USB-to-TTL
 BAUDRATE = 115200
-INTERVAL_SEND = 5           # Pengiriman tiap 5 detik
+NODE_ID = 1                   # ID Node TX
 
-# Setup Serial Port UART
-try:
-    ser = serial.Serial(SERIAL_PORT, baudrate=BAUDRATE, timeout=1)
-    print(f"[TX NODE {NODE_ID}] Port serial {SERIAL_PORT} berhasil dibuka.")
-except Exception as e:
-    print(f"[ERROR] Gagal membuka serial port: {e}")
-    exit(1)
-
-def send_at(cmd: str, delay: float = 0.3) -> str:
-    """Mengirim perintah AT dan mengembalikan respon string."""
+def send_at(ser, cmd, delay=0.3):
     ser.write((cmd + '\r\n').encode('utf-8'))
     time.sleep(delay)
     return ser.read_all().decode('utf-8', errors='ignore').strip()
 
-def setup_rak3272s():
-    print(f"[TX NODE {NODE_ID}] Konfigurasi RAK3272S (SF7, 923.2 MHz)...")
-    send_at("AT+NWM=0")  # Set Mode P2P
-    res = send_at("AT+P2P=923200000:7:0:0:8:20")
-    print(f"[TX NODE {NODE_ID}] Respon P2P Config: {res}")
+def check_and_setup_tx():
+    try:
+        ser = serial.Serial(SERIAL_PORT, baudrate=BAUDRATE, timeout=1)
+        print(f"==================================================")
+        print(f"🔍 MEMERIKSA STATUS RAK3272S TRANSMITTER ({SERIAL_PORT})...")
+        print(f"==================================================")
+        
+        # 1. Tes Komunikasi AT Sederhana
+        res_at = send_at(ser, "AT")
+        if "OK" not in res_at:
+            print("❌ ERROR: RAK3272S TX tidak merespon perintah AT!")
+            return None
+        print("✅ 1. Komunikasi Serial OK (RAK3272S Terhubung)")
 
-def generate_dummy_120_parameters() -> list:
-    """
-    Meng-generate 120 data dummy desimal float.
-    Nilai bervariasi secara realistis tiap pengiriman.
-    """
-    parameters = []
-    base_val = 24.0 if NODE_ID == 1 else 32.0
-    for i in range(120):
-        # Simulasi rentang nilai desimal, misal: 24.15 s.d. 45.80
-        val = round(base_val + (i * 0.15) + random.uniform(-0.8, 0.8), 2)
-        parameters.append(val)
-    return parameters
+        # 2. Set & Cek Mode P2P
+        send_at(ser, "AT+NWM=0")
+        res_nwm = send_at(ser, "AT+NWM=?")
+        print(f"✅ 2. Mode Kerja Saat Ini : {res_nwm}")
 
-def pack_payload(node_id: int, params: list) -> str:
-    """
-    Binary Bit-Packing Protocol:
-    - 1 Byte Node ID (uint8)
-    - 120 x 2 Byte uint16 (Fixed-point scaling x100)
-    Total raw binary = 241 Byte (482 Hex Char)
-    """
-    scaled_params = [int(round(p * 100)) for p in params]
-    fmt = '<B120H'
-    raw_bytes = struct.pack(fmt, node_id, *scaled_params)
+        # 3. Set & Cek Parameter Radio P2P (WAJIB SAMA DENGAN RX)
+        send_at(ser, "AT+P2P=923200000:7:0:0:8:20")
+        res_p2p = send_at(ser, "AT+P2P=?")
+        print(f"✅ 3. Parameter P2P Radio : {res_p2p}")
+        
+        print(f"==================================================")
+        print(f"🚀 RAK3272S TX SIAP MENGIRIM PAKET DUMMY...")
+        print(f"==================================================\n")
+        return ser
+
+    except Exception as e:
+        print(f"❌ Error membuka serial: {e}")
+        return None
+
+def make_dummy_payload(node_id):
+    # Buat 120 parameter dummy (misal nilai 25.50)
+    scaled_params = [2550 for _ in range(120)]
+    # Format: 1 Byte Node ID + 120 x 2 Byte uint16 = 241 Byte
+    raw_bytes = struct.pack('<B120H', node_id, *scaled_params)
     return raw_bytes.hex().upper()
 
 def main():
-    setup_rak3272s()
-    print(f"🚀 Node TX {NODE_ID} Siap Mengirim 120 Data Dummy...")
-    
+    ser = check_and_setup_tx()
+    if not ser:
+        return
+
+    counter = 1
     while True:
         try:
-            # 1. Generate 120 data dummy
-            dummy_data = generate_dummy_120_parameters()
+            timestamp = time.strftime('%H:%M:%S')
+            hex_payload = make_dummy_payload(NODE_ID)
             
-            # 2. Pack ke binary HEX payload
-            hex_payload = pack_payload(NODE_ID, dummy_data)
+            print(f"[{timestamp}] Paket #{counter}: Mengirim 120 parameter (241 Byte) dari Node {NODE_ID}...")
             
-            # 3. Transmisi P2P via RAK3272S
+            # Kirim Perintah AT+PSEND
             cmd = f"AT+PSEND={hex_payload}"
             ser.write((cmd + '\r\n').encode('utf-8'))
-            time.sleep(0.4)
             
-            resp = ser.read_all().decode('utf-8', errors='ignore').strip()
-            print(f"[{time.strftime('%H:%M:%S')}] TX Node {NODE_ID} ({len(hex_payload)//2} Byte) -> {resp}")
+            # Tunggu dan baca respon dari RAK3272S
+            time.sleep(0.5)
+            response = ser.read_all().decode('utf-8', errors='ignore').strip()
             
-            time.sleep(INTERVAL_SEND)
-            
+            if "OK" in response or "+EVT:TXP2P DONE" in response:
+                print(f"   STATUS : ✅ PAKET TERKIRIM KE UDARA! (Respon: {response.replace(chr(10), ' ')})")
+            else:
+                print(f"   STATUS : ⚠️ ADA KENDALA TRANSMISI! Respon Modul: {response}")
+                
+            print("-" * 60)
+            counter += 1
+            time.sleep(4) # Jeda pengiriman tiap 4 detik
+
         except KeyboardInterrupt:
-            print("\n[TX] Pengiriman dihentikan.")
+            print("\n[TX TEST] Dihentikan oleh pengguna.")
             break
-        except Exception as e:
-            print(f"[ERROR TX] {e}")
-            time.sleep(2)
 
 if __name__ == "__main__":
     main()
