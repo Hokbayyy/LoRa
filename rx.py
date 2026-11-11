@@ -1,87 +1,291 @@
+#!/usr/bin/env python3
+"""
+=============================================================================
+RAK3272S LoRa P2P Receiver untuk Raspberry Pi 5
+=============================================================================
+Penulis : Pasangan Pair-Programming Antigravity & User
+Deskripsi: Script penerima data LoRa Point-to-Point (P2P) menggunakan modul
+          RAKwireless RAK3272S (STM32WLE5CC RUI3) yang terhubung ke pin UART
+          Raspberry Pi 5 (/dev/ttyAMA0).
+=============================================================================
+"""
+
 import serial
 import time
+import struct
+import json
+import sys
 
-SERIAL_PORT = '/dev/ttyAMA0'  # Gunakan /dev/ttyUSB0 jika memakai USB-to-TTL
-BAUDRATE = 115200
+# ================= Konfigurasi Port & Radio =================
+# Pada Pi 5: GPIO 14 (TX) & 15 (RX) adalah /dev/ttyAMA0 setelah dtparam=uart0=on
+SERIAL_PORT = '/dev/ttyAMA0'
+BAUDRATE    = 115200
 
-def send_at(ser, cmd, delay=0.3):
+# Pengaturan Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN TRANSMITTER)
+# Frekuensi: 923.2 MHz (Alokasi LoRa Indonesia AS923)
+# SF: 7, Bandwidth: 0 (125 kHz), Coding Rate: 0 (4/5), Preamble: 8, TxPower: 20 dBm
+P2P_FREQ     = 923200000  # 923.2 MHz
+P2P_SF       = 7          # SF7 (Spread Factor 6-12)
+P2P_BW       = 0          # 0: 125kHz, 1: 250kHz, 2: 500kHz
+P2P_CR       = 0          # 0: 4/5, 1: 4/6, 2: 4/7, 3: 4/8
+P2P_PREAMBLE = 8          # Preamble length (default 8)
+P2P_TXPOWER  = 20         # Max 22 dBm
+# =============================================================
+
+
+def send_at_command(ser, cmd, timeout=1.5, expected=None):
+    """
+    Mengirim perintah AT dan membaca respon hingga timeout atau expected respon ditemukan.
+    """
+    ser.reset_input_buffer()
     ser.write((cmd + '\r\n').encode('utf-8'))
-    time.sleep(delay)
-    return ser.read_all().decode('utf-8', errors='ignore').strip()
+    
+    start_time = time.time()
+    responses = []
+    
+    while (time.time() - start_time) < timeout:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if line:
+                responses.append(line)
+                if expected and expected in line:
+                    break
+                if not expected and ("OK" in line or "AT_ERROR" in line or "AT_PARAM_ERROR" in line):
+                    break
+        time.sleep(0.02)
+        
+    return responses
 
-def check_and_setup_rx():
+
+def init_rak3272s_rx(port, baudrate):
+    """
+    Inisialisasi modul RAK3272S sebagai Receiver:
+    1. Tes AT
+    2. Cek/set mode kerja ke LoRa P2P (AT+NWM=0)
+    3. Atur parameter RF P2P
+    4. Aktifkan mode Continuous RX (AT+PRECV=65534)
+       CATATAN PENTING:
+       - 65534 = Mode Continuous RX permanen (tidak berhenti setelah dapat 1 paket).
+       - 65535 = Hanya menerima 1 paket lalu otomatis keluar dari mode RX.
+    """
+    print(f"\n{'='*60}")
+    print(f"📥 INISIALISASI RAK3272S RECEIVER (Port: {port})...")
+    print(f"{'='*60}")
+    
     try:
-        ser = serial.Serial(SERIAL_PORT, baudrate=BAUDRATE, timeout=1)
-        print(f"==================================================")
-        print(f"🔍 MEMERIKSA STATUS RAK3272S RECEIVER ({SERIAL_PORT})...")
-        print(f"==================================================")
-        
-        # 1. Tes Komunikasi AT Sederhana
-        res_at = send_at(ser, "AT")
-        if "OK" not in res_at:
-            print("❌ ERROR: RAK3272S tidak merespon perintah AT!")
-            print("👉 Periksa: Kabel TX/RX terbalik? Baudrate salah? Atau port serial belum diizinkan?")
-            return None
-        print("✅ 1. Komunikasi Serial OK (RAK3272S Terhubung)")
-
-        # 2. Set & Cek Mode P2P
-        send_at(ser, "AT+NWM=0") # Set Mode P2P
-        res_nwm = send_at(ser, "AT+NWM=?")
-        print(f"✅ 2. Mode Kerja Saat Ini : {res_nwm}")
-
-        # 3. Set & Cek Parameter Radio P2P
-        # Freq: 923.2MHz, SF: 7, BW: 125kHz, CR: 4/5, Preamble: 8, Power: 20dBm
-        send_at(ser, "AT+P2P=923200000:7:0:0:8:20")
-        res_p2p = send_at(ser, "AT+P2P=?")
-        print(f"✅ 3. Parameter P2P Radio : {res_p2p}")
-
-        # 4. Aktifkan Mode Receiver Continuous (PRECV)
-        res_precv = send_at(ser, "AT+PRECV=65535")
-        print(f"✅ 4. Status Listening RX  : {res_precv}")
-        
-        print(f"==================================================")
-        print(f"📡 RAK3272S RX SIAP & MENDENGARKAN SINYAL RADIO...")
-        print(f"Menunggu data masuk dari Node TX... (Tekan Ctrl+C untuk berhenti)\n")
-        return ser
-
+        ser = serial.Serial(port, baudrate=baudrate, timeout=1)
     except Exception as e:
-        print(f"❌ Error muka serial: {e}")
+        print(f"❌ GAGAL membuka port serial {port}!")
+        print(f"   Detail Error : {e}")
+        print(f"   Solusi Cepat :")
+        print(f"   1. Pastikan UART aktif: sudo raspi-config -> Interface Options -> Serial")
+        print(f"   2. Pastikan izin dialout: sudo usermod -a -G dialout $USER")
         return None
 
-def main():
-    ser = check_and_setup_rx()
-    if not ser:
-        return
+    # 1. Tes Komunikasi AT
+    print("[1/5] Menguji komunikasi AT dasar...")
+    res = send_at_command(ser, "AT", timeout=1.0)
+    if not any("OK" in line for line in res):
+        time.sleep(0.5)
+        res = send_at_command(ser, "AT", timeout=1.0)
+        if not any("OK" in line for line in res):
+            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT.")
+            print("   👉 Periksa kabel: TX Pin 8 (Pi) -> RX2 (RAK), RX Pin 10 (Pi) -> TX2 (RAK).")
+            ser.close()
+            return None
+    print("   ✅ Respon AT OK! Modul terdeteksi.")
 
-    buffer = ""
-    while True:
+    # Tampilkan Versi Firmware
+    ver = send_at_command(ser, "AT+VER=?", timeout=1.0)
+    print(f"   ℹ️  Firmware Modul: {' '.join(ver)}")
+
+    # 2. Cek Mode Kerja (Harus LoRa P2P / NWM=0)
+    print("[2/5] Memeriksa Mode Kerja Modul (LoRa P2P)...")
+    res_nwm = send_at_command(ser, "AT+NWM=?", timeout=1.0)
+    current_mode = None
+    for line in res_nwm:
+        if "AT+NWM=" in line:
+            current_mode = line.split("=")[-1].strip()
+            
+    if current_mode != "0":
+        print("   ⚠️ Modul saat ini bukan mode P2P! Mengubah ke AT+NWM=0...")
+        ser.write(b"AT+NWM=0\r\n")
+        time.sleep(2.5)
+        ser.reset_input_buffer()
+        res_check = send_at_command(ser, "AT", timeout=1.0)
+        if not any("OK" in line for line in res_check):
+            print("   ❌ Gagal reboot ke mode P2P!")
+            ser.close()
+            return None
+        print("   ✅ Sukses beralih ke Mode P2P (Reboot selesai).")
+    else:
+        print("   ✅ Modul sudah berada dalam Mode P2P (NWM=0).")
+
+    # 3. Konfigurasi Parameter Radio P2P
+    p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
+    print(f"[3/5] Mengatur Parameter P2P: {p2p_cmd}")
+    res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
+    if not any("OK" in line for line in res_p2p):
+        print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
+        ser.close()
+        return None
+        
+    print(f"   ✅ Parameter Radio Terkonfigurasi:")
+    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
+    print(f"      - Spreading F : SF{P2P_SF}")
+    print(f"      - Bandwidth   : 125 kHz")
+    print(f"      - Coding Rate : 4/5")
+
+    # 4. Aktifkan Mode Continuous RX (65534)
+    print("[4/5] Mengaktifkan Mode Continuous RX (AT+PRECV=65534)...")
+    res_precv = send_at_command(ser, "AT+PRECV=65534", timeout=1.5)
+    if not any("OK" in line for line in res_precv):
+        print(f"   ⚠️ Respon PRECV: {res_precv}")
+    else:
+        print("   ✅ Receiver aktif mendengarkan gelombang radio secara kontinu.")
+
+    print("[5/5] Memeriksa status akhir...")
+    p2p_status = send_at_command(ser, "AT+P2P=?", timeout=1.0)
+    print(f"   ℹ️  Status P2P Aktif : {' '.join(p2p_status)}")
+
+    print(f"{'='*60}")
+    print("📡 RECEIVER RAK3272S STANDBY MENDENGARKAN DATA...")
+    print("Menunggu paket dari Transmitter... (Tekan Ctrl+C untuk berhenti)")
+    print(f"{'='*60}\n")
+    return ser
+
+
+def decode_hex_payload(hex_str):
+    """
+    Menganalisis dan men-decode string Hexadecimal menjadi data yang mudah dibaca:
+    1. Mencoba decode UTF-8 (JSON atau plain text)
+    2. Jika berupa binary struct (misal 241 byte = Node ID + 120 uint16), unpack data
+    3. Jika binary umum, tampilkan preview byte
+    """
+    try:
+        raw_bytes = bytes.fromhex(hex_str)
+    except Exception:
+        return f"[Hex Raw Error] {hex_str}", len(hex_str) // 2
+
+    byte_len = len(raw_bytes)
+
+    # Deteksi Format 1: Text UTF-8 / JSON
+    try:
+        decoded_text = raw_bytes.decode('utf-8')
+        # Coba parse sebagai JSON jika mungkin
+        if decoded_text.startswith('{') and decoded_text.endswith('}'):
+            try:
+                parsed_json = json.loads(decoded_text)
+                return f"[JSON Telemetri]: {parsed_json}", byte_len
+            except json.JSONDecodeError:
+                pass
+        return f"[Plain Text]: \"{decoded_text}\"", byte_len
+    except UnicodeDecodeError:
+        pass
+
+    # Deteksi Format 2: Binary Struct 241 Byte (1 Byte Node ID + 120 x 2 Byte uint16)
+    if byte_len == 241:
         try:
+            node_id = raw_bytes[0]
+            values = struct.unpack('<120H', raw_bytes[1:])
+            preview = f"Sample: {values[:5]}... ({len(values)} parameter total)"
+            return f"[Binary 120 Params] Node ID: {node_id} | {preview}", byte_len
+        except Exception:
+            pass
+
+    # Format 3: Binary Lainnya
+    return f"[Raw Hex]: {hex_str[:60]}{'...' if len(hex_str) > 60 else ''}", byte_len
+
+
+def parse_rx_event(line):
+    """
+    Parsing event notifikasi kedatangan data LoRa dari modul RAK3272S.
+    Format standar RUI3:
+      +EVT:RXP2P:<RSSI>:<SNR>:<HEX_PAYLOAD>
+    Format alternatif:
+      +EVT:RXP2P RECEIVE <RSSI> <SNR> <HEX_PAYLOAD>
+    """
+    if "+EVT:RXP2P" not in line:
+        return None
+
+    rssi, snr, hex_payload = None, None, None
+
+    if ":" in line:
+        parts = line.split(":")
+        # Format: +EVT : RXP2P : <RSSI> : <SNR> : <PAYLOAD>
+        if len(parts) >= 5:
+            rssi = parts[2].strip()
+            snr = parts[3].strip()
+            hex_payload = parts[4].strip()
+    
+    if not hex_payload and " " in line:
+        parts = line.split()
+        if len(parts) >= 4:
+            rssi = parts[-3]
+            snr = parts[-2]
+            hex_payload = parts[-1]
+
+    if hex_payload:
+        return {
+            "rssi": rssi,
+            "snr": snr,
+            "hex": hex_payload
+        }
+    return None
+
+
+def main():
+    ser = init_rak3272s_rx(SERIAL_PORT, BAUDRATE)
+    if not ser:
+        sys.exit(1)
+
+    packet_count = 0
+    buffer = ""
+
+    try:
+        while True:
             if ser.in_waiting > 0:
-                data = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
-                buffer += data
-                
+                chunk = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                buffer += chunk
+
                 while '\r\n' in buffer:
                     line, buffer = buffer.split('\r\n', 1)
                     line = line.strip()
-                    
-                    if line:
-                        timestamp = time.strftime('%H:%M:%S')
-                        # Indikator Jika Sinyal Radio Masuk
-                        if "+EVT:RXP2P" in line:
-                            print(f"\n🎉 [{timestamp}] SINYAL DITERIMA!")
-                            print(f"   Raw Event Data : {line}")
-                            parts = line.split(":")
-                            if len(parts) >= 5:
-                                print(f"   --> RSSI : {parts[2]} dBm")
-                                print(f"   --> SNR  : {parts[3]} dB")
-                                print(f"   --> Payload Hex ({len(parts[4])//2} Byte) : {parts[4][:30]}...")
-                        else:
-                            print(f"[{timestamp}] [RAK LOG]: {line}")
-                            
-            time.sleep(0.01)
-        except KeyboardInterrupt:
-            print("\n[RX TEST] Dihentikan oleh pengguna.")
-            break
 
-if __name__ == "__main__":
+                    if not line:
+                        continue
+
+                    # Periksa apakah ada paket LoRa masuk
+                    parsed = parse_rx_event(line)
+                    if parsed:
+                        packet_count += 1
+                        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                        decoded_info, byte_len = decode_hex_payload(parsed['hex'])
+
+                        print(f"🎉 [{timestamp}] 📥 PAKET MASUK #{packet_count}")
+                        print(f"   Kualitas Sinyal : RSSI = {parsed['rssi']} dBm | SNR = {parsed['snr']} dB")
+                        print(f"   Ukuran Data     : {byte_len} Byte")
+                        print(f"   Isi Data        : {decoded_info}")
+                        print(f"   Hex Raw         : {parsed['hex'][:50]}{'...' if len(parsed['hex']) > 50 else ''}")
+                        print("-" * 65)
+                    else:
+                        # Log baris info lain dari modul jika ada
+                        if not line.startswith("OK"):
+                            timestamp = time.strftime('%H:%M:%S')
+                            print(f"[{timestamp}] [INFO/LOG RAK]: {line}")
+
+            time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        print("\n[RECEIVER] Dihentikan oleh pengguna (Ctrl+C).")
+    finally:
+        # Nonaktifkan mode listen (AT+PRECV=0) sebelum keluar
+        if ser and ser.is_open:
+            print("Menghentikan mode receive (AT+PRECV=0)...")
+            send_at_command(ser, "AT+PRECV=0", timeout=0.5)
+            ser.close()
+            print("Serial port berhasil ditutup dengan aman.")
+
+
+if __name__ == '__main__':
     main()
