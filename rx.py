@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Receiver (RX) Node - 35 Parameter Sensor (1 Paket Langsung)
+RAK3272S LoRa P2P Receiver (RX) Node - 80 Parameter Sensor (1 Paket Utuh)
 =============================================================================
 Fitur:
-  - Menerima 35 parameter sensor dalam 1 PAKET LANGSUNG SEKALI TEMBAK (~210B)
-  - Tanpa fragmen, tanpa delay menunggu (instan diterima)
+  - Menerima 80 parameter sensor dalam 1 PAKET LANGSUNG SEKALI TEMBAK (166 Byte)
+  - Tanpa fragmen, tanpa delay menunggu (instan diterima dan di-unpack)
   - Output: 1 BARIS HORIZONTAL PENUH per paket
   - Bebas emoji/emoticon (kompatibel penuh dengan terminal Linux/SSH)
 =============================================================================
@@ -13,7 +13,7 @@ Fitur:
 
 import serial
 import time
-import json
+import struct
 import sys
 import os
 
@@ -45,6 +45,47 @@ P2P_PREAMBLE = 8          # Preamble 8
 P2P_TXPOWER  = 20         # Tx Power 20 dBm
 # =============================================================
 
+SENSOR_80_KEYS = [
+    # 1. P. Lidar (1)
+    "lidar_raw",
+    # 2. P. MQ (3)
+    "mq_nh3", "mq_co", "mq_co2",
+    # 3. P. DFRobot (1)
+    "smoke",
+    # 4. P. MPU (12)
+    "mpu_acc_x_raw", "mpu_acc_y_raw", "mpu_acc_z_raw",
+    "mpu_gyro_x_raw", "mpu_gyro_y_raw", "mpu_gyro_z_raw",
+    "mpu_acc_x_kalman", "mpu_acc_y_kalman", "mpu_acc_z_kalman",
+    "mpu_gyro_x_kalman", "mpu_gyro_y_kalman", "mpu_gyro_z_kalman",
+    # 5. P. ADXL (6)
+    "adxl_acc_x_raw", "adxl_acc_y_raw", "adxl_acc_z_raw",
+    "adxl_acc_x_kalman", "adxl_acc_y_kalman", "adxl_acc_z_kalman",
+    # 6. P. LSM6DS3 (6)
+    "accelx", "accely", "accelz", "gyrox", "gyroy", "gyroz",
+    # 7. P. BME280 (4)
+    "bme_temp", "bme_hum", "bme_pres", "bme_alt",
+    # 8. P. SEN0232 (2)
+    "sound_dbLeft", "sound_dbRight",
+    # 9. Piezzo & FSR (14: C0 - C13)
+    "pzo_r_arm_up", "pzo_r_arm_low", "pzo_l_arm_up", "pzo_l_arm_low",
+    "pzo_r_back_up", "pzo_r_back_low", "pzo_l_back_up", "pzo_l_back_low",
+    "pzo_r_thigh_up", "pzo_r_thigh_mid", "pzo_r_thigh_low",
+    "pzo_l_thigh_up", "pzo_l_thigh_mid", "pzo_l_thigh_low",
+    # 10. TCA9548A #1 (8: SD0 - SD7)
+    "tca1_r_arm_up", "tca1_r_arm_low", "tca1_l_arm_up", "tca1_l_arm_low",
+    "tca1_r_back_up", "tca1_r_back_low", "tca1_l_back_up", "tca1_l_back_low",
+    # 11. TCA9548A #2 (6: SD0 - SD5)
+    "tca2_r_thigh_up", "tca2_r_thigh_mid", "tca2_r_thigh_low",
+    "tca2_l_thigh_up", "tca2_l_thigh_mid", "tca2_l_thigh_low",
+    # 12. Thermal Sensor (1: SD6 on TCA #2)
+    "thermal_temp",
+    # 13. Flex Sensor (16: C0 - C15)
+    "flex_r_shldr_f", "flex_r_shldr_b", "flex_l_shldr_f", "flex_l_shldr_b",
+    "flex_r_elbw_f", "flex_r_elbw_b", "flex_l_elbw_f", "flex_l_elbw_b",
+    "flex_r_waist_f", "flex_r_waist_b", "flex_l_waist_f", "flex_l_waist_b",
+    "flex_r_knee_f", "flex_r_knee_b", "flex_l_knee_f", "flex_l_knee_b"
+]
+
 
 def send_at_command(ser, cmd, timeout=1.5, expected=None):
     ser.reset_input_buffer()
@@ -70,7 +111,7 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 def init_rak3272s_rx(port, baudrate):
     print("=" * 70)
-    print("[INFO] INISIALISASI RECEIVER (RX) - 35 PARAMETER SENSOR")
+    print("[INFO] INISIALISASI RECEIVER (RX) - 80 PARAMETER SENSOR")
     print(f"   Raspberry Pi   : Port {port}")
     print("   Modul RAK3272S : UART2 (Header J4: Pin 7 TX2 & Pin 8 RX2)")
     print(f"   Frekuensi      : {P2P_FREQ / 1e6} MHz | BW: 125 kHz | SF: {P2P_SF}")
@@ -137,7 +178,7 @@ def init_rak3272s_rx(port, baudrate):
         print("   [OK] Receiver aktif mendengarkan gelombang radio.")
 
     print("=" * 70)
-    print("[INFO] RECEIVER SIAP (Format Output: Horizontal 1 Baris)")
+    print("[INFO] RECEIVER SIAP (80 Parameter, Format Output: Horizontal 1 Baris)")
     print("Tekan Ctrl+C untuk berhenti.\n")
     return ser
 
@@ -168,51 +209,64 @@ def parse_rx_event(line):
     return None
 
 
-def format_35_horizontal(d):
-    """Menyusun seluruh 35 parameter sensor menjadi 1 baris horizontal bersih"""
+def format_80_horizontal(d):
+    """Menyusun seluruh 80 parameter sensor menjadi 1 baris horizontal bersih"""
     p = []
-    p.append(f"Lidar:{d.get('lidar_raw', '-')}")
-    p.append(f"MQ(NH3:{d.get('mq_nh3', '-')},CO:{d.get('mq_co', '-')},CO2:{d.get('mq_co2', '-')})")
-    p.append(f"Smoke:{d.get('smoke', '-')}")
+    p.append("Lidar:" + str(d.get("lidar_raw", "-")))
+    p.append("MQ:" + str(d.get("mq_nh3", "-")) + "," + str(d.get("mq_co", "-")) + "," + str(d.get("mq_co2", "-")))
+    p.append("Smoke:" + str(d.get("smoke", "-")))
     
     # MPU
-    p.append(f"MPU_Raw[A:({d.get('mpu_acc_x_raw', '-')},{d.get('mpu_acc_y_raw', '-')},{d.get('mpu_acc_z_raw', '-')}) G:({d.get('mpu_gyro_x_raw', '-')},{d.get('mpu_gyro_y_raw', '-')},{d.get('mpu_gyro_z_raw', '-')})]")
-    p.append(f"MPU_Klm[A:({d.get('mpu_acc_x_kalman', '-')},{d.get('mpu_acc_y_kalman', '-')},{d.get('mpu_acc_z_kalman', '-')}) G:({d.get('mpu_gyro_x_kalman', '-')},{d.get('mpu_gyro_y_kalman', '-')},{d.get('mpu_gyro_z_kalman', '-')})]")
+    p.append("MPU_Raw:[A(" + str(d.get("mpu_acc_x_raw", "-")) + "," + str(d.get("mpu_acc_y_raw", "-")) + "," + str(d.get("mpu_acc_z_raw", "-")) + ") G(" + str(d.get("mpu_gyro_x_raw", "-")) + "," + str(d.get("mpu_gyro_y_raw", "-")) + "," + str(d.get("mpu_gyro_z_raw", "-")) + ")]")
+    p.append("MPU_Klm:[A(" + str(d.get("mpu_acc_x_kalman", "-")) + "," + str(d.get("mpu_acc_y_kalman", "-")) + "," + str(d.get("mpu_acc_z_kalman", "-")) + ") G(" + str(d.get("mpu_gyro_x_kalman", "-")) + "," + str(d.get("mpu_gyro_y_kalman", "-")) + "," + str(d.get("mpu_gyro_z_kalman", "-")) + ")]")
     
     # ADXL
-    p.append(f"ADXL_Raw:({d.get('adxl_acc_x_raw', '-')},{d.get('adxl_acc_y_raw', '-')},{d.get('adxl_acc_z_raw', '-')})")
-    p.append(f"ADXL_Klm:({d.get('adxl_acc_x_kalman', '-')},{d.get('adxl_acc_y_kalman', '-')},{d.get('adxl_acc_z_kalman', '-')})")
+    p.append("ADXL_Raw:(" + str(d.get("adxl_acc_x_raw", "-")) + "," + str(d.get("adxl_acc_y_raw", "-")) + "," + str(d.get("adxl_acc_z_raw", "-")) + ")")
+    p.append("ADXL_Klm:(" + str(d.get("adxl_acc_x_kalman", "-")) + "," + str(d.get("adxl_acc_y_kalman", "-")) + "," + str(d.get("adxl_acc_z_kalman", "-")) + ")")
     
     # LSM6DS3
-    ax = d.get('accelx', d.get('lsm_accel_x', '-'))
-    ay = d.get('accely', d.get('lsm_accel_y', '-'))
-    az = d.get('accelz', d.get('lsm_accel_z', '-'))
-    gx = d.get('gyrox', d.get('lsm_gyro_x', '-'))
-    gy = d.get('gyroy', d.get('lsm_gyro_y', '-'))
-    gz = d.get('gyroz', d.get('lsm_gyro_z', '-'))
-    p.append(f"LSM6DS3[A:({ax},{ay},{az}) G:({gx},{gy},{gz})]")
+    p.append("LSM6DS3:[A(" + str(d.get("accelx", "-")) + "," + str(d.get("accely", "-")) + "," + str(d.get("accelz", "-")) + ") G(" + str(d.get("gyrox", "-")) + "," + str(d.get("gyroy", "-")) + "," + str(d.get("gyroz", "-")) + ")]")
     
-    # BME280
-    p.append(f"BME280({d.get('bme_temp', '-')}C,{d.get('bme_hum', '-') }%,{d.get('bme_pres', '-')}hPa,{d.get('bme_alt', '-')}m)")
+    # BME280 & SEN0232
+    p.append("BME280:(" + str(d.get("bme_temp", "-")) + "C," + str(d.get("bme_hum", "-")) + "%," + str(d.get("bme_pres", "-")) + "hPa," + str(d.get("bme_alt", "-")) + "m)")
+    p.append("Sound:(" + str(d.get("sound_dbLeft", "-")) + "," + str(d.get("sound_dbRight", "-")) + "dB)")
     
-    # SEN0232
-    sl = d.get('sound_dbLeft', d.get('sound_db_left', '-'))
-    sr = d.get('sound_dbRight', d.get('sound_db_right', '-'))
-    p.append(f"Sound(L:{sl},R:{sr}dB)")
+    # Piezzo & FSR (14 Ch: C0 - C13)
+    pzo_keys = [
+        "pzo_r_arm_up", "pzo_r_arm_low", "pzo_l_arm_up", "pzo_l_arm_low",
+        "pzo_r_back_up", "pzo_r_back_low", "pzo_l_back_up", "pzo_l_back_low",
+        "pzo_r_thigh_up", "pzo_r_thigh_mid", "pzo_r_thigh_low",
+        "pzo_l_thigh_up", "pzo_l_thigh_mid", "pzo_l_thigh_low"
+    ]
+    p.append("PiezoFSR[C0-13]:(" + ",".join([str(d.get(k, "-")) for k in pzo_keys]) + ")")
+    
+    # TCA1 (8 Ch: SD0 - SD7)
+    tca1_keys = [
+        "tca1_r_arm_up", "tca1_r_arm_low", "tca1_l_arm_up", "tca1_l_arm_low",
+        "tca1_r_back_up", "tca1_r_back_low", "tca1_l_back_up", "tca1_l_back_low"
+    ]
+    p.append("TCA1[SD0-7]:(" + ",".join([str(d.get(k, "-")) for k in tca1_keys]) + ")")
+    
+    # TCA2 (6 Ch: SD0 - SD5)
+    tca2_keys = [
+        "tca2_r_thigh_up", "tca2_r_thigh_mid", "tca2_r_thigh_low",
+        "tca2_l_thigh_up", "tca2_l_thigh_mid", "tca2_l_thigh_low"
+    ]
+    p.append("TCA2[SD0-5]:(" + ",".join([str(d.get(k, "-")) for k in tca2_keys]) + ")")
+    
+    # Thermal (1 Ch)
+    p.append("Thermal:" + str(d.get("thermal_temp", "-")) + "C")
+    
+    # Flex (16 Ch: C0 - C15)
+    flex_keys = [
+        "flex_r_shldr_f", "flex_r_shldr_b", "flex_l_shldr_f", "flex_l_shldr_b",
+        "flex_r_elbw_f", "flex_r_elbw_b", "flex_l_elbw_f", "flex_l_elbw_b",
+        "flex_r_waist_f", "flex_r_waist_b", "flex_l_waist_f", "flex_l_waist_b",
+        "flex_r_knee_f", "flex_r_knee_b", "flex_l_knee_f", "flex_l_knee_b"
+    ]
+    p.append("Flex[C0-15]:(" + ",".join([str(d.get(k, "-")) for k in flex_keys]) + ")")
     
     return " | ".join(p)
-
-
-SENSOR_35_KEYS = [
-    "lidar_raw", "mq_nh3", "mq_co", "mq_co2", "smoke",
-    "mpu_acc_x_raw", "mpu_acc_y_raw", "mpu_acc_z_raw", "mpu_gyro_x_raw", "mpu_gyro_y_raw", "mpu_gyro_z_raw",
-    "mpu_acc_x_kalman", "mpu_acc_y_kalman", "mpu_acc_z_kalman", "mpu_gyro_x_kalman", "mpu_gyro_y_kalman", "mpu_gyro_z_kalman",
-    "adxl_acc_x_raw", "adxl_acc_y_raw", "adxl_acc_z_raw",
-    "adxl_acc_x_kalman", "adxl_acc_y_kalman", "adxl_acc_z_kalman",
-    "accelx", "accely", "accelz", "gyrox", "gyroy", "gyroz",
-    "bme_temp", "bme_hum", "bme_pres", "bme_alt",
-    "sound_dbLeft", "sound_dbRight"
-]
 
 
 def main():
@@ -222,8 +276,6 @@ def main():
 
     packet_count = 0
     buffer = ""
-    frag_buffer = {}
-    expected_total_parts = 0
     last_rssi = None
     last_snr = None
 
@@ -253,8 +305,24 @@ def main():
                             except Exception:
                                 continue
 
-                            # 1. Format 1 Paket Langsung (DAT35: atau CSV35:) -> Instan Tanpa Fragmen!
-                            if raw_bytes.startswith(b"DAT35:") or raw_bytes.startswith(b"CSV35:"):
+                            # 1. Format 1 Paket Utama: P80: (80 Sensor Biner, 166 Byte Langsung)
+                            if raw_bytes.startswith(b"P80:") and len(raw_bytes) >= 166:
+                                packet_count += 1
+                                try:
+                                    cnt, = struct.unpack('<H', raw_bytes[4:6])
+                                    vals = struct.unpack('<80e', raw_bytes[6:166])
+                                    d_80 = {}
+                                    for idx, val in enumerate(vals):
+                                        if idx < len(SENSOR_80_KEYS):
+                                            d_80[SENSOR_80_KEYS[idx]] = round(val, 3)
+
+                                    h_str = format_80_horizontal(d_80)
+                                    print(f"[{timestamp}] [RX #{cnt:04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [1-Paket {len(raw_bytes)}B (80-Param)] -> {h_str}")
+                                except Exception as err:
+                                    print(f"[{timestamp}] [RX ERROR Unpack P80]: {err}")
+
+                            # 2. Kompatibilitas Paket DAT35 / CSV35 Lama
+                            elif raw_bytes.startswith(b"DAT35:") or raw_bytes.startswith(b"CSV35:"):
                                 packet_count += 1
                                 raw_str = raw_bytes.decode('utf-8', errors='ignore')
                                 parts = raw_str.split(':')
@@ -263,51 +331,13 @@ def main():
 
                                 d_dat = {"node": 1, "cnt": p_cnt}
                                 for idx, val in enumerate(values):
-                                    if idx < len(SENSOR_35_KEYS):
-                                        d_dat[SENSOR_35_KEYS[idx]] = val
+                                    if idx < len(SENSOR_80_KEYS):
+                                        d_dat[SENSOR_80_KEYS[idx]] = val
 
-                                h_str = format_35_horizontal(d_dat)
-                                try:
-                                    cnt_disp = f"#{int(p_cnt):04d}"
-                                except ValueError:
-                                    cnt_disp = f"#{p_cnt}"
+                                h_str = format_80_horizontal(d_dat)
+                                print(f"[{timestamp}] [RX #{int(p_cnt):04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [1-Paket {len(raw_bytes)}B] -> {h_str}")
 
-                                print(f"[{timestamp}] [RX {cnt_disp}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [1-Paket {len(raw_bytes)}B] -> {h_str}")
-
-                            # 2. Data Terfragmen (>250 Byte JSON)
-                            elif raw_bytes.startswith(b"FRG:"):
-                                try:
-                                    meta_part, chunk_data = raw_bytes[4:].split(b":", 1)
-                                    part_str, total_str = meta_part.decode('utf-8').split("/")
-                                    part_num = int(part_str)
-                                    total_parts = int(total_str)
-
-                                    if part_num == 1:
-                                        frag_buffer = {}
-
-                                    expected_total_parts = total_parts
-                                    frag_buffer[part_num] = chunk_data
-
-                                    if len(frag_buffer) == expected_total_parts:
-                                        full_raw = b"".join([frag_buffer[p] for p in sorted(frag_buffer.keys())])
-                                        total_size = len(full_raw)
-                                        packet_count += 1
-
-                                        try:
-                                            full_json = json.loads(full_raw.decode('utf-8'))
-                                            cnt = full_json.get('cnt', packet_count)
-                                            h_str = format_35_horizontal(full_json)
-                                            print(f"[{timestamp}] [RX #{cnt:04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [{total_size}B {total_parts}Frg] -> {h_str}")
-                                        except Exception as e:
-                                            print(f"[{timestamp}] [RX ERROR Reassemble JSON]: {e}")
-
-                                        frag_buffer = {}
-                                        expected_total_parts = 0
-
-                                except Exception as err:
-                                    print(f"[{timestamp}] [RX ERROR Fragment Parse]: {err}")
-
-                            # 3. Payload JSON kecil / teks biasa (Kompatibilitas lama)
+                            # 3. Payload teks lainnya
                             else:
                                 packet_count += 1
                                 try:
@@ -319,7 +349,7 @@ def main():
             time.sleep(0.002)
 
     except KeyboardInterrupt:
-        print(f"\n[RECEIVER] Berhenti. Total {packet_count} paket/kumpulan data diterima.")
+        print(f"\n[RECEIVER] Berhenti. Total {packet_count} paket diterima.")
     finally:
         if ser and ser.is_open:
             print("Menghentikan mode receive (AT+PRECV=0)...")
