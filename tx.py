@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Transmitter (RAK: UART2 <--> Pi 5: UART3)
+RAK3272S LoRa P2P Transmitter (TX) Node
 =============================================================================
-Penulis : Pasangan Pair-Programming Antigravity & User
-Deskripsi: Script pengirim data LoRa Point-to-Point (P2P) menggunakan modul
-          RAKwireless RAK3272S (UART2 di Header J4) yang terhubung ke pin
-          UART3 Raspberry Pi 5 (Pin 24 TX & Pin 21 RX -> /dev/ttyAMA3).
+Konfigurasi Perangkat Keras:
+  - Raspberry Pi 5  : UART3 (/dev/ttyAMA3)
+                      Pin 24 (GPIO 8 - TXD3) & Pin 21 (GPIO 9 - RXD3)
+  - Modul RAK3272S  : UART1 (Header J5)
+                      Pin 5 (RX1) & Pin 6 (TX1)
+                      Tegangan 3.3V (Header J5 Pin 9) & GND (Header J5 Pin 7)
 =============================================================================
 """
 
@@ -15,27 +17,27 @@ import time
 import struct
 import json
 import sys
+import os
 
 # ================= Konfigurasi Port & Radio =================
-# Pi 5: UART3 diaktifkan via dtoverlay=uart3-pi5 (/dev/ttyAMA3)
-# RAK3272S: UART2 di Header J4 (Pin 8 RX2 & Pin 7 TX2)
-SERIAL_PORT = '/dev/ttyAMA3'
-BAUDRATE    = 115200
+# Port serial Pi 5 (bisa di-override lewat argumen: python3 tx.py /dev/ttyAMA3)
+DEFAULT_PORT = '/dev/ttyAMA3'
+SERIAL_PORT  = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PORT
+BAUDRATE     = 115200
 
 # Pengaturan Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN RECEIVER)
-# Frekuensi: 923.2 MHz (Alokasi LoRa Indonesia AS923)
-# SF: 7, Bandwidth: 0 (125 kHz), Coding Rate: 0 (4/5), Preamble: 8, TxPower: 20 dBm
+# Alokasi Frekuensi Indonesia AS923: 923.2 MHz
 P2P_FREQ     = 923200000  # 923.2 MHz
 P2P_SF       = 7          # SF7 (Spread Factor 6-12)
 P2P_BW       = 0          # 0: 125kHz, 1: 250kHz, 2: 500kHz
 P2P_CR       = 0          # 0: 4/5, 1: 4/6, 2: 4/7, 3: 4/8
 P2P_PREAMBLE = 8          # Preamble length (default 8)
-P2P_TXPOWER  = 20         # Max 22 dBm
+P2P_TXPOWER  = 20         # Tx Power 20 dBm (Max 22 dBm)
 
 TX_INTERVAL  = 5          # Interval pengiriman paket (detik)
-NODE_ID      = 1          # ID Node Pengirim
+NODE_ID      = 1          # ID Node Pengirim (Transmitter)
 
-# Pilihan Mode Payload: 'JSON', 'TEXT', atau 'BINARY_120'
+# Mode Payload: 'JSON', 'TEXT', atau 'BINARY_120'
 PAYLOAD_MODE = 'JSON'
 # =============================================================
 
@@ -63,10 +65,11 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 
 def init_rak3272s_tx(port, baudrate):
-    print(f"\n{'='*60}")
-    print(f"🚀 INISIALISASI TRANSMITTER (Pi 5: UART3 <--> RAK: UART2)...")
-    print(f"   Port Pi 5: {port} | Baudrate: {baudrate}")
-    print(f"{'='*60}")
+    print("=" * 65)
+    print("🚀 INISIALISASI TRANSMITTER (TX)")
+    print(f"   Raspberry Pi 5 : UART3 ({port})")
+    print(f"   Modul RAK3272S : UART1 (Header J5: Pin 5 RX1 & Pin 6 TX1)")
+    print("=" * 65)
     
     try:
         ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
@@ -76,18 +79,20 @@ def init_rak3272s_tx(port, baudrate):
         print("   👉 Pastikan dtoverlay=uart3-pi5 sudah ada di /boot/firmware/config.txt")
         return None
 
-    # 1. Tes Komunikasi AT
-    print("[1/5] Menguji komunikasi AT dasar pada UART2 RAK...")
+    # 1. Tes Komunikasi AT pada UART1
+    print("[1/5] Menguji komunikasi AT pada UART1 RAK3272S...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
         time.sleep(0.5)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
-            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT.")
-            print("   👉 Periksa kabel: Pin 24 Pi (TX) -> Header J4 Pin 8 (RX2), Pin 21 Pi (RX) -> Header J4 Pin 7 (TX2).")
+            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART1.")
+            print("   👉 Periksa jalur PCB:")
+            print("      - Pi 5 Pin 24 (TXD3) -> RAK Header J5 Pin 5 (RX1)")
+            print("      - Pi 5 Pin 21 (RXD3) -> RAK Header J5 Pin 6 (TX1)")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi di UART2.")
+    print("   ✅ Respon AT OK! Modul terdeteksi pada UART1.")
 
     # Tampilkan Versi Firmware
     ver = send_at_command(ser, "AT+VER=?", timeout=1.0)
@@ -121,7 +126,7 @@ def init_rak3272s_tx(port, baudrate):
 
     # 4. Konfigurasi Parameter Radio P2P
     p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
-    print(f"[3/5] Mengatur Parameter P2P: {p2p_cmd}")
+    print(f"[3/5] Mengatur Parameter Radio P2P: {p2p_cmd}")
     res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
     if not any("OK" in line for line in res_p2p):
         print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
@@ -129,19 +134,19 @@ def init_rak3272s_tx(port, baudrate):
         return None
         
     print(f"   ✅ Parameter Radio Terkonfigurasi:")
-    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
+    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz (AS923)")
     print(f"      - Spreading F : SF{P2P_SF}")
     print(f"      - Bandwidth   : 125 kHz")
     print(f"      - Coding Rate : 4/5")
     print(f"      - Tx Power    : {P2P_TXPOWER} dBm")
 
-    print("[4/5] Memeriksa status final...")
+    print("[4/5] Memeriksa status parameter aktif...")
     p2p_status = send_at_command(ser, "AT+P2P=?", timeout=1.0)
-    print(f"   ℹ️  Status P2P Aktif : {' '.join(p2p_status)}")
+    print(f"   ℹ️  Status Radio: {' '.join(p2p_status)}")
 
-    print(f"{'='*60}")
-    print("📡 TRANSMITTER RAK3272S SIAP MENGIRIM PAKET!")
-    print(f"{'='*60}\n")
+    print("=" * 65)
+    print("📡 TRANSMITTER RAK3272S (UART1) SIAP MEMANCARKAN DATA!")
+    print("=" * 65 + "\n")
     return ser
 
 
@@ -161,9 +166,10 @@ def generate_payload(mode, counter, node_id):
         raw_bytes = text.encode('utf-8')
         human_readable = text
     elif mode == 'BINARY_120':
+        # Simulasi 120 sensor parameter (masing-masing 16-bit uint16)
         scaled_params = [2550 + (i % 20) for i in range(120)]
         raw_bytes = struct.pack('<B120H', node_id, *scaled_params)
-        human_readable = f"Binary Struct: Node {node_id}, 120 params ({len(raw_bytes)} B)"
+        human_readable = f"Binary Struct: Node {node_id}, 120 params ({len(raw_bytes)} Byte)"
     else:
         raw_bytes = f"Ping #{counter}".encode('utf-8')
         human_readable = f"Ping #{counter}"
@@ -172,7 +178,7 @@ def generate_payload(mode, counter, node_id):
     return hex_string, human_readable, len(raw_bytes)
 
 
-def send_packet(ser, hex_payload, timeout=5.0):
+def send_packet(ser, hex_payload, timeout=6.0):
     ser.reset_input_buffer()
     cmd = f"AT+PSEND={hex_payload}\r\n"
     ser.write(cmd.encode('utf-8'))
@@ -202,9 +208,9 @@ def send_packet(ser, hex_payload, timeout=5.0):
     elapsed = time.time() - start_time
 
     if done_received:
-        return True, f"Berhasil terkirim via radio (+EVT:TXP2P DONE dalam {elapsed:.2f}s)"
+        return True, f"Terkirim via radio LoRa (+EVT:TXP2P DONE dalam {elapsed:.2f}s)"
     elif ok_received:
-        return True, f"Perintah diterima modul (OK dalam {elapsed:.2f}s, radio finish)"
+        return True, f"Diterima modul (OK dalam {elapsed:.2f}s)"
     else:
         return False, f"Timeout! Respon: {log_responses}"
 
@@ -215,7 +221,7 @@ def main():
         sys.exit(1)
 
     counter = 1
-    print(f"Mulai transmisi berkala setiap {TX_INTERVAL} detik (Mode: {PAYLOAD_MODE})...")
+    print(f"Mulai transmisi data berkala setiap {TX_INTERVAL} detik (Format: {PAYLOAD_MODE})...")
     print("Tekan Ctrl+C untuk menghentikan pengiriman.\n")
 
     try:

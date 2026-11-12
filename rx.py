@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Receiver (RAK: UART2 <--> Pi 5: UART3)
+RAK3272S LoRa P2P Receiver (RX) Node
 =============================================================================
-Penulis : Pasangan Pair-Programming Antigravity & User
-Deskripsi: Script penerima data LoRa Point-to-Point (P2P) menggunakan modul
-          RAKwireless RAK3272S (UART2 di Header J4) yang terhubung ke pin
-          UART3 Raspberry Pi 5 (Pin 24 TX & Pin 21 RX -> /dev/ttyAMA3).
+Konfigurasi Perangkat Keras:
+  - Modul RAK3272S  : UART2 (Header J4)
+                      Pin 7 (TX2) & Pin 8 (RX2)
+                      Tegangan 3.3V (Header J5 Pin 9) & GND (Header J4 Pin 4)
+  - Raspberry Pi    : Port Serial Default /dev/ttyAMA0 (UART0) atau /dev/ttyAMA3
+                      - Pi Pin 8  (GPIO 14 - TXD0) -> RAK Header J4 Pin 8 (RX2)
+                      - Pi Pin 10 (GPIO 15 - RXD0) <- RAK Header J4 Pin 7 (TX2)
+                      - Pi Pin 1  (3.3V)           -> RAK Header J5 Pin 9 (3V3)
+                      - Pi Pin 6  (GND)            -> RAK Header J4 Pin 4 (GND)
 =============================================================================
 """
 
@@ -15,22 +20,38 @@ import time
 import struct
 import json
 import sys
+import os
 
 # ================= Konfigurasi Port & Radio =================
-# Pada Pi 5: UART3 diaktifkan via dtoverlay=uart3-pi5
-# Pin 24 (GPIO 8 - TXD3) & Pin 21 (GPIO 9 - RXD3) -> /dev/ttyAMA3
-SERIAL_PORT = '/dev/ttyAMA3'
-BAUDRATE    = 115200
+# Daftar kandidat port serial di Raspberry Pi Receiver
+CANDIDATE_PORTS = [
+    '/dev/ttyAMA0',
+    '/dev/serial0',
+    '/dev/ttyAMA3',
+    '/dev/ttyUSB0'
+]
+
+# Tentukan port serial: gunakan argumen command-line jika ada (misal: python3 rx.py /dev/ttyAMA0)
+if len(sys.argv) > 1:
+    SERIAL_PORT = sys.argv[1]
+else:
+    # Cari port pertama yang tersedia dari daftar kandidat
+    SERIAL_PORT = CANDIDATE_PORTS[0]
+    for p in CANDIDATE_PORTS:
+        if os.path.exists(p):
+            SERIAL_PORT = p
+            break
+
+BAUDRATE = 115200
 
 # Pengaturan Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN TRANSMITTER)
-# Frekuensi: 923.2 MHz (Alokasi LoRa Indonesia AS923)
-# SF: 7, Bandwidth: 0 (125 kHz), Coding Rate: 0 (4/5), Preamble: 8, TxPower: 20 dBm
+# Frekuensi AS923 Indonesia: 923.2 MHz
 P2P_FREQ     = 923200000  # 923.2 MHz
 P2P_SF       = 7          # SF7 (Spread Factor 6-12)
 P2P_BW       = 0          # 0: 125kHz, 1: 250kHz, 2: 500kHz
 P2P_CR       = 0          # 0: 4/5, 1: 4/6, 2: 4/7, 3: 4/8
 P2P_PREAMBLE = 8          # Preamble length (default 8)
-P2P_TXPOWER  = 20         # Max 22 dBm
+P2P_TXPOWER  = 20         # Tx Power 20 dBm
 # =============================================================
 
 
@@ -57,30 +78,34 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 
 def init_rak3272s_rx(port, baudrate):
-    print(f"\n{'='*60}")
-    print(f"📥 INISIALISASI RAK3272S RECEIVER (Port: {port})...")
-    print(f"{'='*60}")
+    print("=" * 65)
+    print("📥 INISIALISASI RECEIVER (RX)")
+    print(f"   Raspberry Pi   : Port {port}")
+    print("   Modul RAK3272S : UART2 (Header J4: Pin 7 TX2 & Pin 8 RX2)")
+    print("=" * 65)
     
     try:
         ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
     except Exception as e:
         print(f"❌ GAGAL membuka port serial {port}!")
         print(f"   Detail Error : {e}")
-        print("   👉 Pastikan dtoverlay=uart3-pi5 sudah ada di /boot/firmware/config.txt")
+        print("   👉 Anda bisa menentukan port secara manual, contoh: python3 rx.py /dev/ttyAMA0")
         return None
 
-    # 1. Tes Komunikasi AT
-    print("[1/5] Menguji komunikasi AT dasar...")
+    # 1. Tes Komunikasi AT pada UART2
+    print("[1/5] Menguji komunikasi AT pada UART2 RAK3272S...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
         time.sleep(0.5)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
-            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT.")
-            print("   👉 Periksa kabel: Pin 24 (Pi TX) -> Header J4 Pin 8 (RX2), Pin 21 (Pi RX) -> Header J4 Pin 7 (TX2).")
+            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART2.")
+            print("   👉 Periksa sambungan kabel:")
+            print(f"      - Pi TX ({port}) -> Header J4 Pin 8 (RX2)")
+            print(f"      - Pi RX ({port}) <- Header J4 Pin 7 (TX2)")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi.")
+    print("   ✅ Respon AT OK! Modul terdeteksi pada UART2.")
 
     # Tampilkan Versi Firmware
     ver = send_at_command(ser, "AT+VER=?", timeout=1.0)
@@ -111,7 +136,7 @@ def init_rak3272s_rx(port, baudrate):
 
     # 3. Konfigurasi Parameter Radio P2P
     p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
-    print(f"[3/5] Mengatur Parameter P2P: {p2p_cmd}")
+    print(f"[3/5] Mengatur Parameter Radio P2P: {p2p_cmd}")
     res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
     if not any("OK" in line for line in res_p2p):
         print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
@@ -119,7 +144,7 @@ def init_rak3272s_rx(port, baudrate):
         return None
         
     print(f"   ✅ Parameter Radio Terkonfigurasi:")
-    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
+    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz (AS923)")
     print(f"      - Spreading F : SF{P2P_SF}")
     print(f"      - Bandwidth   : 125 kHz")
     print(f"      - Coding Rate : 4/5")
@@ -134,12 +159,12 @@ def init_rak3272s_rx(port, baudrate):
 
     print("[5/5] Memeriksa status akhir...")
     p2p_status = send_at_command(ser, "AT+P2P=?", timeout=1.0)
-    print(f"   ℹ️  Status P2P Aktif : {' '.join(p2p_status)}")
+    print(f"   ℹ️  Status Radio: {' '.join(p2p_status)}")
 
-    print(f"{'='*60}")
-    print("📡 RECEIVER RAK3272S STANDBY MENDENGARKAN DATA...")
+    print("=" * 65)
+    print("📡 RECEIVER RAK3272S (UART2) STANDBY MENDENGARKAN DATA...")
     print("Menunggu paket dari Transmitter... (Tekan Ctrl+C untuk berhenti)")
-    print(f"{'='*60}\n")
+    print("=" * 65 + "\n")
     return ser
 
 
@@ -164,7 +189,7 @@ def decode_hex_payload(hex_str):
     except UnicodeDecodeError:
         pass
 
-    # Deteksi Format 2: Binary Struct 241 Byte (1 Byte Node ID + 120 uint16)
+    # Deteksi Format 2: Binary Struct (1 Byte Node ID + 120 uint16)
     if byte_len == 241:
         try:
             node_id = raw_bytes[0]

@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-Tes Komunikasi AT RAK3272S (UART2) via Raspberry Pi 5 (UART3: /dev/ttyAMA3)
+Tes Komunikasi AT RAK3272S
 =============================================================================
-Koneksi:
-  - Pi 5 Pin 24 (TXD3) -> RAK3272S Header J4 Pin 8 (RX2)
-  - Pi 5 Pin 21 (RXD3) -> RAK3272S Header J4 Pin 7 (TX2)
-  - Pi 5 Pin 1  (3.3V) -> RAK3272S Header J5 Pin 9 (3V3)
-  - Pi 5 Pin 6  (GND)  -> RAK3272S Header J4 Pin 4 (GND)
+Dapat digunakan untuk menguji:
+1. Node TX : python3 cek.py /dev/ttyAMA3  (UART1 Header J5)
+2. Node RX : python3 cek.py /dev/ttyAMA0  (UART2 Header J4)
 =============================================================================
 """
 
 import serial
 import time
 import sys
+import os
 
-PORT = '/dev/ttyAMA3'
+# Tentukan port dari argumen terminal, atau auto-detect default
+if len(sys.argv) > 1:
+    PORT = sys.argv[1]
+else:
+    PORT = '/dev/ttyAMA3' if os.path.exists('/dev/ttyAMA3') else '/dev/ttyAMA0'
+
 BAUDRATE = 115200
 
 print("=" * 65)
-print(f"📡 MENGUJI AT: RAK3272S (UART2) <--> PI 5 (UART3: {PORT})...")
-print("📌 Susunan Kabel:")
-print("   - Pin 24 Pi 5 (TXD3) -> Header J4 Pin 8 RAK (RX2)")
-print("   - Pin 21 Pi 5 (RXD3) -> Header J4 Pin 7 RAK (TX2)")
-print("   - Pin 1  Pi 5 (3.3V) -> Header J5 Pin 9 RAK (3V3)")
-print("   - Pin 6  Pi 5 (GND)  -> Header J4 Pin 4 RAK (GND)")
+print(f"📡 MENGUJI RESPON AT MODUL RAK3272S")
+print(f"   Port Serial : {PORT} ({BAUDRATE} bps)")
 print("=" * 65)
 
 try:
@@ -45,7 +45,7 @@ try:
     ser.write(b"AT\r\n")
     ser.flush()
 
-    print("2. Menunggu respon dari UART2 modul...")
+    print("2. Menunggu respon dari modul...")
     start = time.time()
     response = b""
 
@@ -64,9 +64,16 @@ try:
     print("-" * 65)
 
     if b"OK" in response or "OK" in text:
-        print("🎉 BERHASIL! RAK3272S (UART2) merespon 'OK' via UART3 (/dev/ttyAMA3)!")
+        print(f"🎉 BERHASIL! RAK3272S merespon 'OK' dengan sempurna pada {PORT}!")
+        
+        # Cek versi firmware
+        ser.write(b"AT+VER=?\r\n")
+        ser.flush()
+        time.sleep(0.3)
+        ver = ser.read_all().decode('utf-8', errors='replace').strip()
+        print(f"ℹ️  Firmware: {ver}")
     else:
-        print("⚠️ Belum ada respon OK. Periksa kembali kabel di Header J4 (Pin 7 TX2 & Pin 8 RX2).")
+        print("⚠️ Belum ada respon OK. Periksa kembali sambungan kabel TX/RX.")
 
     ser.close()
 
