@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Receiver (RX) Node - 35 Parameter Sensor (>250 Byte)
+RAK3272S LoRa P2P Receiver (RX) Node - 35 Parameter Sensor (1 Paket Langsung)
 =============================================================================
 Fitur:
-  - Menerima dan me-reassemble data besar (>250 Byte / ~718 Byte) otomatis
-  - Menampilkan seluruh 35 parameter sensor dalam 1 BARIS HORIZONTAL PENUH
+  - Menerima 35 parameter sensor dalam 1 PAKET LANGSUNG SEKALI TEMBAK (~210B)
+  - Tanpa fragmen, tanpa delay menunggu (instan diterima)
+  - Output: 1 BARIS HORIZONTAL PENUH per paket
   - Bebas emoji/emoticon (kompatibel penuh dengan terminal Linux/SSH)
 =============================================================================
 """
@@ -136,7 +137,7 @@ def init_rak3272s_rx(port, baudrate):
         print("   [OK] Receiver aktif mendengarkan gelombang radio.")
 
     print("=" * 70)
-    print("[INFO] RECEIVER SIAP MENERIMA (Format Output: Horizontal 1 Baris)")
+    print("[INFO] RECEIVER SIAP (Format Output: Horizontal 1 Baris)")
     print("Tekan Ctrl+C untuk berhenti.\n")
     return ser
 
@@ -252,8 +253,29 @@ def main():
                             except Exception:
                                 continue
 
-                            # 1. Bagian dari data terfragmen (>250 Byte / JSON 35 Param)
-                            if raw_bytes.startswith(b"FRG:"):
+                            # 1. Format 1 Paket Langsung (DAT35: atau CSV35:) -> Instan Tanpa Fragmen!
+                            if raw_bytes.startswith(b"DAT35:") or raw_bytes.startswith(b"CSV35:"):
+                                packet_count += 1
+                                raw_str = raw_bytes.decode('utf-8', errors='ignore')
+                                parts = raw_str.split(':')
+                                p_cnt = parts[1] if len(parts) > 1 else str(packet_count)
+                                values = parts[2].split(',') if len(parts) > 2 else []
+
+                                d_dat = {"node": 1, "cnt": p_cnt}
+                                for idx, val in enumerate(values):
+                                    if idx < len(SENSOR_35_KEYS):
+                                        d_dat[SENSOR_35_KEYS[idx]] = val
+
+                                h_str = format_35_horizontal(d_dat)
+                                try:
+                                    cnt_disp = f"#{int(p_cnt):04d}"
+                                except ValueError:
+                                    cnt_disp = f"#{p_cnt}"
+
+                                print(f"[{timestamp}] [RX {cnt_disp}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [1-Paket {len(raw_bytes)}B] -> {h_str}")
+
+                            # 2. Data Terfragmen (>250 Byte JSON)
+                            elif raw_bytes.startswith(b"FRG:"):
                                 try:
                                     meta_part, chunk_data = raw_bytes[4:].split(b":", 1)
                                     part_str, total_str = meta_part.decode('utf-8').split("/")
@@ -266,7 +288,6 @@ def main():
                                     expected_total_parts = total_parts
                                     frag_buffer[part_num] = chunk_data
 
-                                    # Jika semua fragmen sudah lengkap, cetak 1 baris horizontal!
                                     if len(frag_buffer) == expected_total_parts:
                                         full_raw = b"".join([frag_buffer[p] for p in sorted(frag_buffer.keys())])
                                         total_size = len(full_raw)
@@ -276,7 +297,7 @@ def main():
                                             full_json = json.loads(full_raw.decode('utf-8'))
                                             cnt = full_json.get('cnt', packet_count)
                                             h_str = format_35_horizontal(full_json)
-                                            print(f"[{timestamp}] [RX #{cnt:04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [{total_size}B] -> {h_str}")
+                                            print(f"[{timestamp}] [RX #{cnt:04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [{total_size}B {total_parts}Frg] -> {h_str}")
                                         except Exception as e:
                                             print(f"[{timestamp}] [RX ERROR Reassemble JSON]: {e}")
 
@@ -285,22 +306,6 @@ def main():
 
                                 except Exception as err:
                                     print(f"[{timestamp}] [RX ERROR Fragment Parse]: {err}")
-
-                            # 2. Format CSV 35 Parameter (Mode Single Packet)
-                            elif raw_bytes.startswith(b"CSV35:"):
-                                packet_count += 1
-                                raw_str = raw_bytes.decode('utf-8', errors='ignore')
-                                parts = raw_str.split(':')
-                                p_cnt = parts[1] if len(parts) > 1 else '?'
-                                values = parts[2].split(',') if len(parts) > 2 else []
-
-                                d_csv = {"node": 1, "cnt": p_cnt}
-                                for idx, val in enumerate(values):
-                                    if idx < len(SENSOR_35_KEYS):
-                                        d_csv[SENSOR_35_KEYS[idx]] = val
-
-                                h_str = format_35_horizontal(d_csv)
-                                print(f"[{timestamp}] [RX #{int(p_cnt):04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [CSV {len(raw_bytes)}B] -> {h_str}")
 
                             # 3. Payload JSON kecil / teks biasa (Kompatibilitas lama)
                             else:

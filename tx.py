@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Transmitter (TX) Node - 35 Parameter Sensor (>250 Byte)
+RAK3272S LoRa P2P Transmitter (TX) Node - 35 Parameter (1 Paket Sekali Kirim)
 =============================================================================
 Daftar Parameter Sensor (Total 35 Parameter Sesuai Permintaan):
   [A] ARDUINO UNO Q:
@@ -17,12 +17,15 @@ Daftar Parameter Sensor (Total 35 Parameter Sesuai Permintaan):
       7. P. BME280  : bme_temp, bme_hum, bme_pres, bme_alt -> 4 Param
       8. P. SEN0232 : sound_dbLeft, sound_dbRight -> 2 Param
 
-Format Output: Horizontal 1 Baris Penuh per Transmisi Paket.
+Mode Transmisi:
+  - Default: 1 Paket Langsung Sekali Kirim (~210 Byte). Tidak ada fragmen!
+    Menggunakan seluruh 35 parameter secara instan (< 256B batas chip SX1262).
+  - Output: 1 Baris Horizontal per Transmisi.
 =============================================================================
 Penggunaan:
-  python3 tx.py                  (Default: 35 parameter JSON 718B, interval 1s)
+  python3 tx.py                  (Default: 35 param 1 paket langsung, interval 1s)
   python3 tx.py 0.5              (Transmisi super cepat tiap 0.5 detik)
-  python3 tx.py 1 single         (Mode 1 Paket Tunggal 35 Param CSV ~203B)
+  python3 tx.py 0.2              (Transmisi ultra cepat tiap 0.2 detik)
 =============================================================================
 """
 
@@ -36,13 +39,13 @@ import os
 DEFAULT_PORT = '/dev/ttyAMA3'
 SERIAL_PORT  = DEFAULT_PORT
 TX_INTERVAL  = 1.0  # Default interval 1.0 detik
-PAYLOAD_MODE = 'JSON_35_LONG'  # 'JSON_35_LONG' (~718B) atau 'SINGLE_CSV_35' (~203B)
+PAYLOAD_MODE = 'SINGLE_PACKET_35'  # Default: 1 Paket Langsung Sekali Kirim
 
 # Membaca argumen terminal
 args = sys.argv[1:]
 for arg in args:
-    if arg == 'single':
-        PAYLOAD_MODE = 'SINGLE_CSV_35'
+    if arg == 'json':
+        PAYLOAD_MODE = 'JSON_35_LONG'
     elif arg.startswith('/dev/'):
         SERIAL_PORT = arg
     else:
@@ -91,7 +94,7 @@ def init_rak3272s_tx(port, baudrate):
     print("[INFO] INISIALISASI TRANSMITTER (TX) - 35 PARAMETER SENSOR")
     print(f"   Raspberry Pi 5 : UART3 ({port})")
     print(f"   Modul RAK3272S : UART1 (Header J5: Pin 5 RX1 & Pin 6 TX1)")
-    print(f"   Mode Transmisi : {PAYLOAD_MODE}")
+    print(f"   Mode Transmisi : 1 Paket Tunggal Langsung (~210 Byte, Tanpa Fragmen)")
     print(f"   Target Interval: {TX_INTERVAL} detik")
     print("=" * 70)
     
@@ -152,7 +155,7 @@ def init_rak3272s_tx(port, baudrate):
     print(f"      - Tx Power    : {P2P_TXPOWER} dBm")
 
     print("=" * 70)
-    print("[INFO] TRANSMITTER SIAP MENGIRIM (Format Output: Horizontal 1 Baris)")
+    print("[INFO] TRANSMITTER SIAP (1 Paket Sekali Kirim Langsung)")
     print("=" * 70 + "\n")
     return ser
 
@@ -257,8 +260,8 @@ def format_35_horizontal(d):
     return " | ".join(p)
 
 
-def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
-    """Mengirim 1 paket biner/teks via AT+PSEND (Maks 245 Byte per paket)"""
+def send_single_raw_packet(ser, raw_bytes, timeout=1.5):
+    """Mengirim 1 paket langsung via AT+PSEND (Maks 245 Byte per paket)"""
     hex_payload = raw_bytes.hex().upper()
     ser.reset_input_buffer()
     cmd = f"AT+PSEND={hex_payload}\r\n"
@@ -282,8 +285,8 @@ def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
                     break
         else:
             if ok_received:
-                time.sleep(0.01)
-                if (time.time() - start_time) > 0.12:
+                time.sleep(0.005)
+                if (time.time() - start_time) > 0.08:
                     done_received = True
                     break
             else:
@@ -296,33 +299,6 @@ def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
         return False, f"Timeout! {log_responses}"
 
 
-def send_large_data_fragmented(ser, raw_bytes, chunk_size=185):
-    """
-    Memecah data besar (>250 Byte) menjadi paket-paket terfragmen
-    sehingga muat di batas buffer chip LoRa SX1262 (Maks 256B)
-    """
-    total_len = len(raw_bytes)
-    chunks = [raw_bytes[i:i + chunk_size] for i in range(0, total_len, chunk_size)]
-    total_parts = len(chunks)
-    
-    t_start = time.time()
-    all_success = True
-
-    for idx, chunk in enumerate(chunks):
-        header = f"FRG:{idx+1}/{total_parts}:".encode('utf-8')
-        packet = header + chunk
-        
-        ok, msg = send_single_raw_packet(ser, packet, timeout=1.5)
-        if not ok:
-            all_success = False
-            break
-        
-        time.sleep(0.02)
-
-    total_ms = (time.time() - t_start) * 1000
-    return all_success, total_parts, total_ms
-
-
 def main():
     ser = init_rak3272s_tx(SERIAL_PORT, BAUDRATE)
     if not ser:
@@ -330,7 +306,7 @@ def main():
 
     counter = 1
 
-    print(f"[INFO] Transmisi 35 parameter sensor aktif setiap {TX_INTERVAL} detik.")
+    print(f"[INFO] Transmisi 35 parameter sensor (1 Paket Langsung) setiap {TX_INTERVAL} detik.")
     print("Tekan Ctrl+C untuk berhenti.\n")
 
     try:
@@ -338,30 +314,18 @@ def main():
             t_pkt_start = time.time()
             timestamp = time.strftime('%H:%M:%S')
 
-            if PAYLOAD_MODE == 'JSON_35_LONG':
-                # Mode data besar (>250 Byte, sekitar 718 Byte)
-                data_dict = get_35_sensor_data(counter, NODE_ID)
-                json_bytes = json.dumps(data_dict, separators=(',', ':')).encode('utf-8')
-                total_bytes = len(json_bytes)
+            # Hasilkan 35 parameter data
+            data_dict = get_35_sensor_data(counter, NODE_ID)
+            h_str = format_35_horizontal(data_dict)
 
-                success, parts, ms = send_large_data_fragmented(ser, json_bytes, chunk_size=185)
-                h_str = format_35_horizontal(data_dict)
+            # Mode Default: 1 Paket Tunggal Langsung (~210 Byte)
+            p_values = [str(v) for k, v in data_dict.items() if k not in ('node', 'cnt')]
+            payload = f"DAT35:{counter}:{','.join(p_values)}".encode('utf-8')
 
-                if success:
-                    print(f"[{timestamp}] [TX #{counter:04d}] [{total_bytes}B {parts}Frg {ms:.0f}ms] -> {h_str}")
-                else:
-                    print(f"[{timestamp}] [TX #{counter:04d}] [WARN Gagal Sebagian Fragmen] -> {h_str}")
+            success, msg = send_single_raw_packet(ser, payload, timeout=1.5)
+            status_str = f"OK {msg}" if success else "WARN"
 
-            else:
-                # Mode 1 paket tunggal 35 param CSV (~203 Byte)
-                data_dict = get_35_sensor_data(counter, NODE_ID)
-                p_values = [str(v) for k, v in data_dict.items() if k not in ('node', 'cnt')]
-                csv_payload = f"CSV35:{counter}:{','.join(p_values)}".encode('utf-8')
-
-                success, msg = send_single_raw_packet(ser, csv_payload, timeout=2.0)
-                h_str = format_35_horizontal(data_dict)
-                status_str = f"OK {msg}" if success else "WARN"
-                print(f"[{timestamp}] [TX #{counter:04d}] [CSV {len(csv_payload)}B {status_str}] -> {h_str}")
+            print(f"[{timestamp}] [TX #{counter:04d}] [1-Paket {len(payload)}B {status_str}] -> {h_str}")
 
             counter += 1
 
