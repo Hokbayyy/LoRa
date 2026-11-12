@@ -1,61 +1,61 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-Uji Loopback Hardware UART Raspberry Pi 5
+Uji Loopback UART3 Raspberry Pi 5 (/dev/ttyAMA3)
 =============================================================================
-Fungsi:
-Menghubungkan Pin 8 (GPIO 14 - TXD0) langsung ke Pin 10 (GPIO 15 - RXD0)
-menggunakan satu kabel jumper pendek untuk memastikan bahwa peripheral UART
-Raspberry Pi 5 aktif dan bekerja normal.
+Koneksi Loopback:
+Hubungkan Pin 24 (GPIO 8 - TXD3) langsung ke Pin 21 (GPIO 9 - RXD3) dengan
+satu kabel jumper.
 =============================================================================
 """
 
 import serial
 import time
+import os
 import sys
 
-# Pada Raspberry Pi 5, GPIO 14 & 15 adalah UART0 (/dev/ttyAMA0)
-PORT = '/dev/ttyAMA0'
+PORT = '/dev/ttyAMA3'
 BAUDRATE = 115200
 
-print("=" * 60)
-print(f"🔍 UJI LOOPBACK RASPBERRY PI 5 PADA PORT: {PORT}")
-print("=" * 60)
+print("=" * 65)
+print(f"🔍 UJI LOOPBACK UART3 PI 5 PADA PORT: {PORT}")
 print("📌 PERSIAPAN:")
-print("   Hubungkan langsung Pin 8 (TXD) ke Pin 10 (RXD) pada header 40-pin Pi 5")
-print("   menggunakan sebuah kabel jumper (tanpa modul RAK3272S terlebih dahulu).\n")
+print("   Hubungkan Pin 24 (TXD3) langsung ke Pin 21 (RXD3) pada header 40-pin")
+print("   menggunakan sebuah kabel jumper.")
+print("=" * 65)
+
+if not os.path.exists(PORT):
+    print(f"❌ Port {PORT} belum aktif di sistem!")
+    print("👉 Tambahkan 'dtoverlay=uart3-pi5' di /boot/firmware/config.txt")
+    print("   lalu reboot Pi 5: sudo reboot")
+    sys.exit(1)
 
 try:
-    ser = serial.Serial(PORT, baudrate=BAUDRATE, timeout=1)
+    ser = serial.Serial(PORT, baudrate=BAUDRATE, timeout=1.5, rtscts=False)
     ser.reset_input_buffer()
     ser.reset_output_buffer()
-
-    test_msg = b"TEST_RASPI5_UART_LOOPBACK_12345\r\n"
-    print(f"1. Mengirim data uji : {test_msg.strip().decode()}")
-    ser.write(test_msg)
     time.sleep(0.2)
 
-    received = ser.read_all()
-    print(f"2. Data yang diterima: {received.strip().decode(errors='replace')}")
+    test_msg = b"TEST_UART3_PI5_LOOPBACK_12345\n"
+    print(f"1. Mengirim ({len(test_msg)} byte) : {test_msg.decode().strip()}")
+    ser.write(test_msg)
+    ser.flush()
 
-    print("-" * 60)
-    if test_msg.strip() in received:
-        print("✅ HASIL: LOOPBACK BERHASIL (100% SUKSES)!")
-        print(f"   Peripheral UART0 ({PORT}) pada Pi 5 berfungsi sempurna.")
-        print("   Pin 8 (TX) dan Pin 10 (RX) dapat mengirim dan menerima data dengan benar.")
-        print("   --> Sekarang Anda dapat menghubungkannya ke modul RAK3272S.")
+    time.sleep(0.1)
+    received = ser.read(len(test_msg))
+    print(f"2. Diterima ({len(received)} byte) : {received.decode(errors='replace').strip()}")
+    print("-" * 65)
+
+    if test_msg == received or test_msg.strip() in received:
+        print("🎉 HASIL: 100% SUKSES! LOOPBACK UART3 BERHASIL!")
+        print("   Pin 24 (TXD3) dan Pin 21 (RXD3) bekerja dengan sempurna.")
+        print("   Port /dev/ttyAMA3 siap dihubungkan ke modul RAK3272S!")
     else:
-        print("❌ HASIL: LOOPBACK GAGAL!")
-        print("   Penyebab kemungkinan:")
-        print("   1. Kabel jumper tidak terpasang kencang di Pin 8 dan Pin 10.")
-        print("   2. UART0 belum diaktifkan di /boot/firmware/config.txt (dtparam=uart0=on).")
-        print("   3. Port sedang digunakan oleh proses lain (cek: lsof /dev/ttyAMA0).")
+        print("⚠️ HASIL: Data tidak cocok atau belum diterima.")
 
     ser.close()
 
 except Exception as e:
-    print(f"❌ Error membuka port {PORT}: {e}")
-    print("\n👉 Tips: Pastikan Anda menjalankan perintah dengan user yang memiliki izin dialout:")
-    print("   sudo usermod -a -G dialout $USER && sudo reboot")
+    print(f"❌ Error: {e}")
 
-print("=" * 60)
+print("=" * 65)

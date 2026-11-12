@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Transmitter untuk Raspberry Pi 5
+RAK3272S LoRa P2P Transmitter (RAK: UART1 <--> Pi 5: UART3)
 =============================================================================
 Penulis : Pasangan Pair-Programming Antigravity & User
 Deskripsi: Script pengirim data LoRa Point-to-Point (P2P) menggunakan modul
-          RAKwireless RAK3272S (STM32WLE5CC RUI3) yang terhubung ke pin UART
-          Raspberry Pi 5 (/dev/ttyAMA0).
+          RAKwireless RAK3272S (UART1 di Header J5) yang terhubung ke pin
+          UART3 Raspberry Pi 5 (Pin 24 TX & Pin 21 RX -> /dev/ttyAMA3).
 =============================================================================
 """
 
@@ -17,8 +17,9 @@ import json
 import sys
 
 # ================= Konfigurasi Port & Radio =================
-# Pada Pi 5: GPIO 14 (TX) & 15 (RX) adalah /dev/ttyAMA0 setelah dtparam=uart0=on
-SERIAL_PORT = '/dev/ttyAMA0'
+# Pi 5: UART3 diaktifkan via dtoverlay=uart3-pi5 (/dev/ttyAMA3)
+# RAK3272S: UART1 di Header J5 (Pin 5 RX1 & Pin 6 TX1)
+SERIAL_PORT = '/dev/ttyAMA3'
 BAUDRATE    = 115200
 
 # Pengaturan Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN RECEIVER)
@@ -34,17 +35,15 @@ P2P_TXPOWER  = 20         # Max 22 dBm
 TX_INTERVAL  = 5          # Interval pengiriman paket (detik)
 NODE_ID      = 1          # ID Node Pengirim
 
-# Pilihan Mode Payload: 'TEXT', 'JSON', atau 'BINARY_120' (120 sensor parameters)
-PAYLOAD_MODE = 'JSON'     # 'JSON' / 'TEXT' / 'BINARY_120'
+# Pilihan Mode Payload: 'JSON', 'TEXT', atau 'BINARY_120'
+PAYLOAD_MODE = 'JSON'
 # =============================================================
 
 
 def send_at_command(ser, cmd, timeout=1.5, expected=None):
-    """
-    Mengirim perintah AT dan membaca respon hingga timeout atau expected respon ditemukan.
-    """
     ser.reset_input_buffer()
     ser.write((cmd + '\r\n').encode('utf-8'))
+    ser.flush()
     
     start_time = time.time()
     responses = []
@@ -64,40 +63,31 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 
 def init_rak3272s_tx(port, baudrate):
-    """
-    Inisialisasi modul RAK3272S:
-    1. Tes AT
-    2. Cek/set mode kerja ke LoRa P2P (AT+NWM=0)
-    3. Atur parameter RF P2P
-    4. Pastikan receiver disabled (AT+PRECV=0) agar siap mengirim
-    """
     print(f"\n{'='*60}")
-    print(f"🚀 INISIALISASI RAK3272S TRANSMITTER (Port: {port})...")
+    print(f"🚀 INISIALISASI TRANSMITTER (Pi 5: UART3 <--> RAK: UART1)...")
+    print(f"   Port Pi 5: {port} | Baudrate: {baudrate}")
     print(f"{'='*60}")
     
     try:
-        ser = serial.Serial(port, baudrate=baudrate, timeout=1)
+        ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
     except Exception as e:
         print(f"❌ GAGAL membuka port serial {port}!")
         print(f"   Detail Error : {e}")
-        print(f"   Solusi Cepat :")
-        print(f"   1. Pastikan UART aktif: sudo raspi-config -> Interface Options -> Serial")
-        print(f"   2. Pastikan izin dialout: sudo usermod -a -G dialout $USER")
+        print("   👉 Pastikan dtoverlay=uart3-pi5 sudah ada di /boot/firmware/config.txt")
         return None
 
     # 1. Tes Komunikasi AT
-    print("[1/5] Menguji komunikasi AT dasar...")
+    print("[1/5] Menguji komunikasi AT dasar pada UART1 RAK...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
-        # Coba kirim sekali lagi barangkali modul baru bangun
         time.sleep(0.5)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
             print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT.")
-            print("   👉 Periksa kabel: TX Pin 8 (Pi) -> RX2 (RAK), RX Pin 10 (Pi) -> TX2 (RAK).")
+            print("   👉 Periksa kabel: Pin 24 Pi (TX) -> Pin 5 J5 (RX1), Pin 21 Pi (RX) -> Pin 6 J5 (TX1).")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi.")
+    print("   ✅ Respon AT OK! Modul terdeteksi di UART1.")
 
     # Tampilkan Versi Firmware
     ver = send_at_command(ser, "AT+VER=?", timeout=1.0)
@@ -114,7 +104,7 @@ def init_rak3272s_tx(port, baudrate):
     if current_mode != "0":
         print("   ⚠️ Modul saat ini bukan mode P2P! Mengubah ke AT+NWM=0...")
         ser.write(b"AT+NWM=0\r\n")
-        # Perubahan NWM menyebabkan modul reboot otomatis
+        ser.flush()
         time.sleep(2.5)
         ser.reset_input_buffer()
         res_check = send_at_command(ser, "AT", timeout=1.0)
@@ -156,12 +146,6 @@ def init_rak3272s_tx(port, baudrate):
 
 
 def generate_payload(mode, counter, node_id):
-    """
-    Membuat data payload dan mengembalikannya dalam format HEX string:
-    - JSON        : Payload IoT umum (suhu, kelembapan, counter, id)
-    - TEXT        : Pesan teks sederhana
-    - BINARY_120  : Format binary struct 241 byte (Node ID + 120 sensor data uint16)
-    """
     if mode == 'JSON':
         data = {
             "node": node_id,
@@ -177,10 +161,9 @@ def generate_payload(mode, counter, node_id):
         raw_bytes = text.encode('utf-8')
         human_readable = text
     elif mode == 'BINARY_120':
-        # 1 Byte Node ID + 120 x 2 Byte uint16 = 241 Byte payload
         scaled_params = [2550 + (i % 20) for i in range(120)]
         raw_bytes = struct.pack('<B120H', node_id, *scaled_params)
-        human_readable = f"Binary Struct: Node {node_id}, 120 parameters (Total: {len(raw_bytes)} Bytes)"
+        human_readable = f"Binary Struct: Node {node_id}, 120 params ({len(raw_bytes)} B)"
     else:
         raw_bytes = f"Ping #{counter}".encode('utf-8')
         human_readable = f"Ping #{counter}"
@@ -190,14 +173,10 @@ def generate_payload(mode, counter, node_id):
 
 
 def send_packet(ser, hex_payload, timeout=5.0):
-    """
-    Kirim payload hex via AT+PSEND dan tunggu konfirmasi transmisi:
-    1. 'OK' -> modul menerima perintah
-    2. '+EVT:TXP2P DONE' -> transmisi radio selesai
-    """
     ser.reset_input_buffer()
     cmd = f"AT+PSEND={hex_payload}\r\n"
     ser.write(cmd.encode('utf-8'))
+    ser.flush()
     
     start_time = time.time()
     ok_received = False
@@ -248,7 +227,6 @@ def main():
             print(f"   Payload  : {desc}")
             print(f"   Ukuran   : {byte_len} Byte ({len(hex_payload)} karakter Hex)")
 
-            # Eksekusi Pengiriman
             success, msg = send_packet(ser, hex_payload, timeout=6.0)
 
             if success:
@@ -263,9 +241,9 @@ def main():
     except KeyboardInterrupt:
         print("\n[TRANSMITTER] Dihentikan oleh pengguna (Ctrl+C).")
     finally:
-        # Kembalikan modul ke idle dan tutup koneksi
         if ser and ser.is_open:
             ser.write(b"AT+PRECV=0\r\n")
+            ser.flush()
             time.sleep(0.1)
             ser.close()
             print("Serial port berhasil ditutup dengan aman.")

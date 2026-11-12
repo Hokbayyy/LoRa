@@ -1,229 +1,80 @@
-# Panduan Komunikasi LoRa P2P: 2x Raspberry Pi 5 dengan Modul RAK3272S
+# Panduan Komunikasi LoRa P2P: 2x Raspberry Pi 5 (UART3) & RAK3272S (UART1)
 
 Proyek ini menyediakan implementasi lengkap komunikasi nirkabel **LoRa Point-to-Point (P2P)** antar dua perangkat **Raspberry Pi 5** yang masing-masing menggunakan modul **RAKwireless RAK3272S Breakout Board** (berbasis chip STM32WLE5CC dengan firmware RUI3).
 
----
-
-## 📑 Daftar Isi
-1. [Arsitektur Sistem](#-arsitektur-sistem)
-2. [Skema Pengkabelan (Wiring Diagram)](#-skema-pengkabelan-wiring-diagram)
-3. [Konfigurasi Raspberry Pi 5 OS (Bookworm)](#-konfigurasi-raspberry-pi-5-os-bookworm)
-4. [Instalasi Dependensi](#-instalasi-dependensi)
-5. [Struktur File](#-struktur-file)
-6. [Langkah Uji Coba](#-langkah-uji-coba)
-7. [Penjelasan Parameter Radio & AT Command](#-penjelasan-parameter-radio--at-command)
-8. [Troubleshooting & Solusi](#-troubleshooting--solusi)
+Konfigurasi Port:
+* **Raspberry Pi 5:** Menggunakan **UART3** (Pin 24 TX & Pin 21 RX) $\rightarrow$ `/dev/ttyAMA3`
+* **RAK3272S:** Menggunakan **UART1** (Header J5: Pin 6 TX1 & Pin 5 RX1)
 
 ---
 
-## 📡 Arsitektur Sistem
+## 📡 Skema Pengkabelan (Wiring Diagram)
 
-```
-+--------------------------+                      +--------------------------+
-|      Raspberry Pi 5      |                      |      Raspberry Pi 5      |
-|      (TRANSMITTER)       |                      |        (RECEIVER)        |
-|                          |                      |                          |
-|  GPIO 14 (TX) / 15 (RX)  |                      |  GPIO 14 (TX) / 15 (RX)  |
-|       /dev/ttyAMA0       |                      |       /dev/ttyAMA0       |
-+------------+-------------+                      +------------+-------------+
-             | UART (115200)                                   | UART (115200)
-             v                                                 v
-+--------------------------+                      +--------------------------+
-|      RAK3272S Node 1     |    Gelombang LoRa    |      RAK3272S Node 2     |
-|   (TX2 / RX2 - UART2)    | >>> (923.2 MHz) >>>> |   (TX2 / RX2 - UART2)    |
-|       Mode: P2P          |                      |       Mode: P2P          |
-|    (AT+PSEND=...)        |                      |    (AT+PRECV=65534)      |
-+--------------------------+                      +--------------------------+
-```
+Semua koneksi ke modul RAK3272S berada di satu deret header yang sama, yaitu **Header J5**:
+
+| Pin Raspberry Pi 5 (40-Pin Header) | Fungsi Pin Pi 5 | Pin Modul RAK3272S (Header J5) | Fungsi RAK3272S | Keterangan |
+| :--- | :--- | :--- | :--- | :--- |
+| **Pin 1** (atau Pin 17) | **3.3V Power** | **Header J5 Pin 9** | **3V3 (VDD)** | Tegangan kerja 3.3V (**JANGAN hubungkan ke 5V!**) |
+| **Pin 6** (atau Pin 9, 14, 20, 25) | **GND** | **Header J5 Pin 7** | **GND** | Ground bersama |
+| **Pin 24** (GPIO 8) | **UART3 TXD** | **Header J5 Pin 5** | **RX1** (UART1 RX) | Jalur TX Pi 5 $\rightarrow$ RX modul RAK |
+| **Pin 21** (GPIO 9) | **UART3 RXD** | **Header J5 Pin 6** | **TX1** (UART1 TX) | Jalur RX Pi 5 $\leftarrow$ TX modul RAK |
+
+> 💡 **Kelebihan Menggunakan UART1 (Header J5):**
+> Keempat pin (3V3, GND, TX1, RX1) terkumpul rapi di **Header J5 saja**, tidak perlu menyilang atau memakai dua header berbeda.
+>
+> ⚠️ **PERINGATAN KRUSIAL:**
+> Pasang **Antena LoRa** pada konektor IPEX/SMA RAK3272S **SEBELUM** menyalakan modul atau memprogram transmisi untuk mencegah kerusakan amplifier radio internal (PA).
 
 ---
 
-## 🔌 Skema Pengkabelan (Wiring Diagram)
+## ⚙️ Konfigurasi Raspberry Pi 5 (Aktifkan UART3)
 
-Koneksi kabel sama persis untuk **kedua perangkat** (Raspberry Pi 5 TX dan Raspberry Pi 5 RX).
+Tambahkan overlay **`uart3-pi5`** ke file konfigurasi bootloader Pi 5:
 
-> ⚠️ **PERINGATAN KRUSIAL**:
-> - Pasang **Antena LoRa** pada konektor IPEX/SMA RAK3272S **SEBELUM** menyalakan modul. Menyalakan transmitter tanpa antena dapat merusak chip RF amplifier!
-> - Sambungkan daya modul ke **Pin 1 (3.3V)**. **JANGAN** pernah menyambungkan pin VCC RAK3272S ke **5V** karena akan merusak modul!
-
-| Pin Raspberry Pi 5 (40-Pin Header) | Fungsi Pi 5 | Pin Modul RAK3272S (Header J4) | Keterangan |
-| :--- | :--- | :--- | :--- |
-| **Pin 1** | **3.3V Power** | **3V3 (VCC)** | Sumber tegangan 3.3V |
-| **Pin 6** (atau Pin 9, 14, 20) | **GND** | **GND** | Ground bersama |
-| **Pin 8** (GPIO 14) | **UART0 TXD** | **RX2** (Header J4 Pin 8) | Pin TX Pi 5 ke RX modul |
-| **Pin 10** (GPIO 15) | **UART0 RXD** | **TX2** (Header J4 Pin 7) | Pin RX Pi 5 ke TX modul |
-
-*Catatan: Port serial utama RAK3272S untuk AT Command bawaan pabrik berada pada antarmuka **UART2 (TX2 / RX2)**.*
-
----
-
-## ⚙️ Konfigurasi Raspberry Pi 5 OS (Bookworm)
-
-Pada Raspberry Pi 5, arsitektur I/O dikontrol oleh chip RP1 baru:
-- Serial console linux secara default dipindahkan ke konektor debug 3-pin terpisah (`/dev/ttyAMA10`).
-- Pin GPIO 14 & 15 pada header 40-pin adalah **`UART0`** yang diakses melalui device node **`/dev/ttyAMA0`**, dan status default-nya nonaktif.
-
-Lakukan langkah berikut pada **kedua Raspberry Pi 5**:
-
-### Metode 1: Menggunakan `raspi-config` (Paling Mudah)
-1. Buka terminal Pi 5:
-   ```bash
-   sudo raspi-config
-   ```
-2. Pilih menu **Interface Options** -> **Serial Port**.
-3. Saat ditanya *"Would you like a login shell to be accessible over serial?"* -> Pilih **No**.
-4. Saat ditanya *"Would you like the serial port hardware to be enabled?"* -> Pilih **Yes**.
-5. Reboot Raspberry Pi:
-   ```bash
-   sudo reboot
-   ```
-
-### Metode 2: Edit Manual `/boot/firmware/config.txt`
 1. Buka file konfigurasi:
    ```bash
    sudo nano /boot/firmware/config.txt
    ```
 2. Pastikan baris berikut ada di bawah blok `[all]`:
    ```ini
-   dtparam=uart0=on
+   [all]
+   dtparam=nvme
+   dtparam=pciex1_gen=3
+   dtoverlay=uart3-pi5
    ```
 3. Simpan (`Ctrl+O`, `Enter`, `Ctrl+X`) lalu reboot:
    ```bash
    sudo reboot
    ```
-
-### Tambahkan Izin User ke Grup Dialout
-Agar script Python dapat mengakses port serial tanpa `sudo`:
-```bash
-sudo usermod -a -G dialout $USER
-sudo chmod 666 /dev/ttyAMA0
-```
-
----
-
-## 📦 Instalasi Dependensi
-
-Jalankan perintah berikut di kedua Raspberry Pi 5:
-```bash
-sudo apt update
-sudo apt install -y python3-serial
-```
-*(Atau gunakan pip jika dalam virtual environment: `pip install pyserial`)*
-
----
-
-## 📂 Struktur File
-
-| Nama File | Deskripsi |
-| :--- | :--- |
-| **`tx.py`** | Script Transmitter: Mengirim data LoRa P2P berkala (JSON / Teks / Binary Struct). |
-| **`rx.py`** | Script Receiver: Menerima data LoRa P2P terus-menerus (`AT+PRECV=65534`), menampilkan RSSI, SNR, dan isi payload. |
-| **`scan.py`** | Script diagnostik: Mendeteksi keberadaan modul RAK3272S pada port-port serial. |
-| **`testloopback.py`** | Script uji loopback UART hardware Raspberry Pi 5 (Pin 8 TX dihubungkan ke Pin 10 RX). |
+4. Setelah reboot, pastikan port serial aktif:
+   ```bash
+   ls -l /dev/ttyAMA3
+   ```
 
 ---
 
 ## 🚀 Langkah Uji Coba
 
-### Langkah 1: Uji Hardware UART Pi 5 (Opsional tapi Direkomendasikan)
-Untuk memastikan port serial Pi 5 berfungsi normal sebelum modul dipasang:
-1. Hubungkan langsung Pin 8 ke Pin 10 menggunakan satu kabel jumper.
-2. Jalankan:
-   ```bash
-   python3 testloopback.py
-   ```
-3. Jika muncul tulisan `LOOPBACK BERHASIL (100% SUKSES)`, lepas jumper lalu pasang modul RAK3272S sesuai tabel wiring.
-
-### Langkah 2: Pindai & Deteksi Modul RAK3272S
-Pastikan modul RAK3272S telah terhubung ke Pi 5, lalu jalankan:
+### 1. Uji Komunikasi AT dengan Modul
+Jalankan script verifikasi:
 ```bash
-python3 scan.py
+python3 cek.py
 ```
-Output yang diharapkan:
+*Jika sukses, akan langsung muncul:*
 ```text
-✅ TERHUBUNG!
-🎉 DITEMUKAN RAK3272S:
-   Port Serial : /dev/ttyAMA0
-   Baud Rate   : 115200
-   Versi FW    : RAKwireless RUI3 v...
-   Mode Kerja  : AT+NWM=0
+Raw Data Diterima : b'\r\nOK\r\n'
+Teks Terbaca      : 'OK'
+🎉 BERHASIL! RAK3272S merespon 'OK' via UART3 (/dev/ttyAMA3)!
 ```
 
-### Langkah 3: Jalankan Receiver pada Pi 5 Pertama
-Pada Raspberry Pi 5 yang berfungsi sebagai **Receiver**:
+### 2. Jalankan Receiver pada Pi 5 Pertama
 ```bash
 python3 rx.py
 ```
-Terminal akan menampilkan inisialisasi P2P dan status standby mendengarkan sinyal:
-```text
-📡 RECEIVER RAK3272S STANDBY MENDENGARKAN DATA...
-Menunggu paket dari Transmitter... (Tekan Ctrl+C untuk berhenti)
-```
 
-### Langkah 4: Jalankan Transmitter pada Pi 5 Kedua
-Pada Raspberry Pi 5 yang berfungsi sebagai **Transmitter**:
+### 3. Jalankan Transmitter pada Pi 5 Kedua
 ```bash
 python3 tx.py
 ```
-Transmitter akan mengirim paket setiap 5 detik:
-```text
-[2026-11-11 19:15:00] 📤 [Paket #1]
-   Payload  : {"node": 1, "cnt": 1, "temp": 25.5, "hum": 61.2, "volt": 3.31}
-   Ukuran   : 65 Byte (130 karakter Hex)
-   STATUS   : ✅ Berhasil terkirim via radio (+EVT:TXP2P DONE dalam 0.38s)
-```
 
-Pada layar **Receiver**, data akan langsung tertangkap:
-```text
-🎉 [2026-11-11 19:15:00] 📥 PAKET MASUK #1
-   Kualitas Sinyal : RSSI = -45 dBm | SNR = 10 dB
-   Ukuran Data     : 65 Byte
-   Isi Data        : [JSON Telemetri]: {'node': 1, 'cnt': 1, 'temp': 25.5, 'hum': 61.2, 'volt': 3.31}
-```
-
----
-
-## 📻 Penjelasan Parameter Radio & AT Command
-
-Kedua script (`tx.py` dan `rx.py`) menggunakan konfigurasi frekuensi yang sama:
-```text
-AT+P2P=923200000:7:0:0:8:20
-```
-
-| Parameter | Nilai | Penjelasan |
-| :--- | :--- | :--- |
-| **Frekuensi** | `923200000` | 923.2 MHz (Alokasi Frekuensi Bebas Regulasi Indonesia / AS923) |
-| **Spreading Factor (SF)** | `7` | Keseimbangan terbaik antara jarak jangkau dan kecepatan data |
-| **Bandwidth (BW)** | `0` | `0` = 125 kHz (`1` = 250 kHz, `2` = 500 kHz) |
-| **Coding Rate (CR)** | `0` | `0` = 4/5 |
-| **Preamble Length** | `8` | Standar sinkronisasi paket |
-| **Tx Power** | `20` | Daya pancar 20 dBm (Maksimal modul 22 dBm) |
-
-### Mengapa menggunakan `AT+PRECV=65534`?
-Pada firmware RUI3 RAKwireless:
-- **`AT+PRECV=65535`**: Modul hanya mendengarkan sampai **1 paket** diterima, lalu otomatis keluar dari mode receive (kembali ke idle/TX).
-- **`AT+PRECV=65534`**: Modul mendengarkan secara **terus-menerus (continuous permanent)** tanpa berhenti meskipun telah menerima banyak paket. Ini mode wajib untuk Receiver gateway/listener!
-
----
-
-## 🛠️ Troubleshooting & Solusi
-
-1. **Error: "Modul RAK3272S tidak merespon perintah AT"**
-   - Periksa apakah kabel TX dan RX tertukar. Hubungkan Pin 8 Pi (TX) ke Pin RX2 RAK, dan Pin 10 Pi (RX) ke Pin TX2 RAK.
-   - Pastikan ground GND kedua perangkat terhubung erat.
-   - Pastikan header yang dipakai adalah header **J4** (UART2) bukan UART1.
-
-2. **Error: "Permission Denied: /dev/ttyAMA0"**
-   - User saat ini belum dimasukkan ke grup dialout. Jalankan:
-     ```bash
-     sudo usermod -a -G dialout $USER
-     sudo chmod 666 /dev/ttyAMA0
-     ```
-   - Lalu logout dan login kembali, atau reboot.
-
-3. **Status: "AT_BUSY_ERROR" saat Mengirim**
-   - Modul sedang berada dalam status listening (RX). Script `tx.py` sudah menangani ini dengan mengirim `AT+PRECV=0` terlebih dahulu sebelum transmisi.
-
-4. **Receiver tidak menerima paket meskipun TX sukses**
-   - Pastikan parameter frekuensi (`P2P_FREQ`), SF, BW, dan CR di `tx.py` dan `rx.py` **100% identik**.
-   - Pastikan kedua modul memiliki antena yang terpasang dengan baik.
+Transmitter akan memancarkan data secara berkala (JSON telemetri / 120 sensor parameter) pada frekuensi AS923 (923.2 MHz), dan Receiver akan menangkapnya beserta indikator RSSI dan SNR secara realtime!
