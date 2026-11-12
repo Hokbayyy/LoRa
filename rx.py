@@ -3,16 +3,11 @@
 =============================================================================
 RAK3272S LoRa P2P Ultra-Fast Receiver (RX) Node
 =============================================================================
-Fitur Kecepatan Tinggi (Sub-Detik):
-  - Bandwidth   : 500 kHz (Sinkron dengan TX untuk transmisi ~20 ms)
-  - Latensi     : Menangkap paket sub-detik secara real-time
-  - Port Default: /dev/ttyAMA0 (UART0) atau port yang ditentukan lewat argumen
-  - Metrik      : Menghitung kecepatan penerimaan (Paket/detik / Hz), RSSI, SNR
-
-Penggunaan:
-  python3 rx.py                     (Auto-detect port serial)
-  python3 rx.py /dev/ttyAMA0        (Pakai UART0 Header J4 RAK3272S)
-  python3 rx.py /dev/ttyAMA3        (Pakai UART3 jika receiver pakai UART3)
+Fitur:
+  - Bandwidth   : 500 kHz (Wajib SAMA dengan TX)
+  - Frekuensi   : 923.2 MHz (AS923)
+  - Spreading F : SF7
+  - Port Default: /dev/ttyAMA0 (UART0 Header J4 Pin 7 & 8)
 =============================================================================
 """
 
@@ -42,10 +37,10 @@ else:
 
 BAUDRATE = 115200
 
-# Pengaturan Radio LoRa P2P Ultra-Fast (WAJIB PERSIS SAMA DENGAN TX)
-P2P_FREQ     = 923200000  # 923.2 MHz (AS923)
+# Parameter Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN TRANSMITTER)
+P2P_FREQ     = 923200000  # 923.2 MHz
 P2P_SF       = 7          # SF7
-P2P_BW       = 2          # 2: 500kHz (Ultra-Fast 500kHz!)
+P2P_BW       = 2          # 2: 500kHz (Ultra Fast)
 P2P_CR       = 0          # 0: 4/5
 P2P_PREAMBLE = 8          # Preamble 8
 P2P_TXPOWER  = 20         # Tx Power 20 dBm
@@ -76,10 +71,10 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 def init_rak3272s_rx(port, baudrate):
     print("=" * 65)
-    print("⚡ INISIALISASI RECEIVER ULTRA-FAST (SUB-DETIK)")
+    print("⚡ INISIALISASI RECEIVER (RX)")
     print(f"   Raspberry Pi   : Port {port}")
     print("   Modul RAK3272S : UART2 (Header J4: Pin 7 TX2 & Pin 8 RX2)")
-    print(f"   Bandwidth      : 500 kHz (Ultra Fast)")
+    print(f"   Frekuensi      : {P2P_FREQ / 1e6} MHz | BW: 500 kHz | SF: {P2P_SF}")
     print("=" * 65)
     
     try:
@@ -87,16 +82,18 @@ def init_rak3272s_rx(port, baudrate):
     except Exception as e:
         print(f"❌ GAGAL membuka port serial {port}!")
         print(f"   Detail Error : {e}")
+        print("   👉 Coba tentukan port manual, contoh: python3 rx.py /dev/ttyAMA0")
         return None
 
     # 1. Tes Komunikasi AT
-    print("[1/4] Menguji komunikasi AT pada UART2...")
+    print("[1/4] Menguji komunikasi AT dasar pada UART2...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
         time.sleep(0.3)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
             print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART2.")
+            print(f"   👉 Periksa kabel di Header J4: Pi TX -> Pin 8 (RX2), Pi RX -> Pin 7 (TX2).")
             ser.close()
             return None
     print("   ✅ Respon AT OK! Modul terdeteksi di UART2.")
@@ -119,6 +116,11 @@ def init_rak3272s_rx(port, baudrate):
             print("   ❌ Gagal reboot ke mode P2P!")
             ser.close()
             return None
+    else:
+        print("   ✅ Modul sudah berada dalam Mode P2P (NWM=0).")
+
+    # Matikan mode RX sebelumnya agar konfigurasi parameter tidak 'busy'
+    send_at_command(ser, "AT+PRECV=0", timeout=0.5)
 
     # 3. Konfigurasi Parameter Radio P2P Ultra-Fast (BW=500kHz)
     p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
@@ -131,8 +133,9 @@ def init_rak3272s_rx(port, baudrate):
         
     print(f"   ✅ Konfigurasi Radio Aktif:")
     print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
-    print(f"      - Bandwidth   : 500 kHz (Ultra Fast)")
+    print(f"      - Bandwidth   : 500 kHz (BW=2)")
     print(f"      - Spreading F : SF{P2P_SF}")
+    print(f"      - Coding Rate : 4/5")
 
     # 4. Aktifkan Continuous RX
     print("[3/4] Mengaktifkan Mode Continuous RX (AT+PRECV=65534)...")
@@ -140,12 +143,15 @@ def init_rak3272s_rx(port, baudrate):
     if not any("OK" in line for line in res_precv):
         print(f"   ⚠️ Respon PRECV: {res_precv}")
     else:
-        print("   ✅ Receiver aktif mendengarkan gelombang radio.")
+        print("   ✅ Receiver aktif mendengarkan gelombang radio secara kontinu.")
+
+    # 5. Cek status radio final
+    p2p_stat = send_at_command(ser, "AT+P2P=?", timeout=1.0)
+    print(f"[4/4] Status Radio Final: {' '.join(p2p_stat)}")
 
     print("=" * 65)
-    print("📡 RECEIVER SIAP MENANGKAP PAKET DENGAN KECEPATAN TINGGI!")
-    print("Menunggu paket masuk... (Tekan Ctrl+C untuk berhenti)")
-    print("=" * 65 + "\n")
+    print("📡 RECEIVER STANDBY MENDENGARKAN SINYAL LORA...")
+    print("Tekan Ctrl+C untuk berhenti.\n")
     return ser
 
 
@@ -170,7 +176,7 @@ def decode_hex_payload(hex_str):
     except UnicodeDecodeError:
         pass
 
-    # Deteksi Format 2: Binary Struct 8 Byte (Node + Counter + Temp + Hum)
+    # Deteksi Format 2: Binary Struct 8 Byte
     if byte_len == 8:
         try:
             node_id, counter, temp_scaled, hum_int = struct.unpack('<BIHB', raw_bytes)
@@ -185,28 +191,26 @@ def parse_rx_event(line):
     if "+EVT:RXP2P" not in line:
         return None
 
-    rssi, snr, hex_payload = None, None, None
-
+    # Format RUI3: +EVT:RXP2P:<RSSI>:<SNR>:<Payload>
     if ":" in line:
         parts = line.split(":")
         if len(parts) >= 5:
-            rssi = parts[2].strip()
-            snr = parts[3].strip()
-            hex_payload = parts[4].strip()
+            return {
+                "rssi": parts[2].strip(),
+                "snr": parts[3].strip(),
+                "hex": parts[4].strip()
+            }
     
-    if not hex_payload and " " in line:
+    # Format fallback jika pemisah spasi
+    if " " in line:
         parts = line.split()
         if len(parts) >= 4:
-            rssi = parts[-3]
-            snr = parts[-2]
-            hex_payload = parts[-1]
+            return {
+                "rssi": parts[-3],
+                "snr": parts[-2],
+                "hex": parts[-1]
+            }
 
-    if hex_payload:
-        return {
-            "rssi": rssi,
-            "snr": snr,
-            "hex": hex_payload
-        }
     return None
 
 
@@ -227,39 +231,41 @@ def main():
                 chunk = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
                 buffer += chunk
 
-                while '\r\n' in buffer:
-                    line, buffer = buffer.split('\r\n', 1)
-                    line = line.strip()
+                # Tangani pemisah baris \n maupun \r\n secara aman
+                if '\n' in buffer:
+                    lines = buffer.split('\n')
+                    buffer = lines[-1]
 
-                    if not line:
-                        continue
+                    for raw_line in lines[:-1]:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
 
-                    parsed = parse_rx_event(line)
-                    if parsed:
-                        packet_count += 1
-                        stat_counter += 1
-                        now = time.time()
+                        parsed = parse_rx_event(line)
+                        if parsed:
+                            packet_count += 1
+                            stat_counter += 1
+                            now = time.time()
 
-                        # Hitung throughput (pkt/s)
-                        if now - last_stat_time >= 1.0:
-                            hz = stat_counter / (now - last_stat_time)
-                            rate_str = f"| Speed: {hz:.1f} pkt/s ({hz:.1f} Hz)"
-                            stat_counter = 0
-                            last_stat_time = now
-                        else:
-                            rate_str = ""
+                            if now - last_stat_time >= 1.0:
+                                hz = stat_counter / (now - last_stat_time)
+                                rate_str = f"| Speed: {hz:.1f} pkt/s ({hz:.1f} Hz)"
+                                stat_counter = 0
+                                last_stat_time = now
+                            else:
+                                rate_str = ""
 
-                        decoded_info, byte_len = decode_hex_payload(parsed['hex'])
-                        timestamp = time.strftime('%H:%M:%S')
-
-                        # Tampilan ringkas 1-baris agar cepat dan tidak membebani terminal
-                        print(f"[{timestamp}] ⚡ [#{packet_count:05d}] {decoded_info} ({byte_len}B) | RSSI:{parsed['rssi']}dBm SNR:{parsed['snr']}dB {rate_str}")
-                    else:
-                        if not line.startswith("OK") and not line.startswith("AT"):
+                            decoded_info, byte_len = decode_hex_payload(parsed['hex'])
                             timestamp = time.strftime('%H:%M:%S')
-                            print(f"[{timestamp}] [INFO]: {line}")
 
-            time.sleep(0.002)  # Polling 2ms untuk latensi instan
+                            print(f"[{timestamp}] ⚡ [#{packet_count:05d}] {decoded_info} ({byte_len}B) | RSSI:{parsed['rssi']}dBm SNR:{parsed['snr']}dB {rate_str}")
+                        else:
+                            # Tampilkan pesan atau peringatan dari modul
+                            if "TIMEOUT" not in line and not line.startswith("OK"):
+                                timestamp = time.strftime('%H:%M:%S')
+                                print(f"[{timestamp}] [INFO DARI MODUL]: {line}")
+
+            time.sleep(0.002)
 
     except KeyboardInterrupt:
         total_time = time.time() - t_start_all
