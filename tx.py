@@ -17,12 +17,10 @@ Daftar Parameter Sensor (Total 35 Parameter Sesuai Permintaan):
       7. P. BME280  : bme_temp, bme_hum, bme_pres, bme_alt -> 4 Param
       8. P. SEN0232 : sound_dbLeft, sound_dbRight -> 2 Param
 
-Total Ukuran Payload: ~745 Byte (Jauh melampaui batas LoRa 250 Byte!).
-Sistem secara otomatis memecah paket (Auto-Fragmentation) dan mengirimkannya
-dengan kecepatan tinggi (sub-detik).
-
+Format Output: Horizontal 1 Baris Penuh per Transmisi Paket.
+=============================================================================
 Penggunaan:
-  python3 tx.py                  (Default: 35 parameter JSON 745B, interval 1s)
+  python3 tx.py                  (Default: 35 parameter JSON 718B, interval 1s)
   python3 tx.py 0.5              (Transmisi super cepat tiap 0.5 detik)
   python3 tx.py 1 single         (Mode 1 Paket Tunggal 35 Param CSV ~203B)
 =============================================================================
@@ -38,7 +36,7 @@ import os
 DEFAULT_PORT = '/dev/ttyAMA3'
 SERIAL_PORT  = DEFAULT_PORT
 TX_INTERVAL  = 1.0  # Default interval 1.0 detik
-PAYLOAD_MODE = 'JSON_35_LONG'  # 'JSON_35_LONG' (~745B) atau 'SINGLE_CSV_35' (~203B)
+PAYLOAD_MODE = 'JSON_35_LONG'  # 'JSON_35_LONG' (~718B) atau 'SINGLE_CSV_35' (~203B)
 
 # Membaca argumen terminal
 args = sys.argv[1:]
@@ -89,13 +87,13 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 
 def init_rak3272s_tx(port, baudrate):
-    print("=" * 65)
+    print("=" * 70)
     print("[INFO] INISIALISASI TRANSMITTER (TX) - 35 PARAMETER SENSOR")
     print(f"   Raspberry Pi 5 : UART3 ({port})")
     print(f"   Modul RAK3272S : UART1 (Header J5: Pin 5 RX1 & Pin 6 TX1)")
     print(f"   Mode Transmisi : {PAYLOAD_MODE}")
     print(f"   Target Interval: {TX_INTERVAL} detik")
-    print("=" * 65)
+    print("=" * 70)
     
     try:
         ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
@@ -153,9 +151,9 @@ def init_rak3272s_tx(port, baudrate):
     print(f"      - Spreading F : SF{P2P_SF}")
     print(f"      - Tx Power    : {P2P_TXPOWER} dBm")
 
-    print("=" * 65)
-    print("[INFO] TRANSMITTER SIAP MENGIRIM 35 PARAMETER SENSOR")
-    print("=" * 65 + "\n")
+    print("=" * 70)
+    print("[INFO] TRANSMITTER SIAP MENGIRIM (Format Output: Horizontal 1 Baris)")
+    print("=" * 70 + "\n")
     return ser
 
 
@@ -224,6 +222,41 @@ def get_35_sensor_data(counter, node_id=1):
     }
 
 
+def format_35_horizontal(d):
+    """Menyusun seluruh 35 parameter sensor menjadi 1 baris horizontal bersih"""
+    p = []
+    p.append(f"Lidar:{d.get('lidar_raw', '-')}")
+    p.append(f"MQ(NH3:{d.get('mq_nh3', '-')},CO:{d.get('mq_co', '-')},CO2:{d.get('mq_co2', '-')})")
+    p.append(f"Smoke:{d.get('smoke', '-')}")
+    
+    # MPU
+    p.append(f"MPU_Raw[A:({d.get('mpu_acc_x_raw', '-')},{d.get('mpu_acc_y_raw', '-')},{d.get('mpu_acc_z_raw', '-')}) G:({d.get('mpu_gyro_x_raw', '-')},{d.get('mpu_gyro_y_raw', '-')},{d.get('mpu_gyro_z_raw', '-')})]")
+    p.append(f"MPU_Klm[A:({d.get('mpu_acc_x_kalman', '-')},{d.get('mpu_acc_y_kalman', '-')},{d.get('mpu_acc_z_kalman', '-')}) G:({d.get('mpu_gyro_x_kalman', '-')},{d.get('mpu_gyro_y_kalman', '-')},{d.get('mpu_gyro_z_kalman', '-')})]")
+    
+    # ADXL
+    p.append(f"ADXL_Raw:({d.get('adxl_acc_x_raw', '-')},{d.get('adxl_acc_y_raw', '-')},{d.get('adxl_acc_z_raw', '-')})")
+    p.append(f"ADXL_Klm:({d.get('adxl_acc_x_kalman', '-')},{d.get('adxl_acc_y_kalman', '-')},{d.get('adxl_acc_z_kalman', '-')})")
+    
+    # LSM6DS3
+    ax = d.get('accelx', d.get('lsm_accel_x', '-'))
+    ay = d.get('accely', d.get('lsm_accel_y', '-'))
+    az = d.get('accelz', d.get('lsm_accel_z', '-'))
+    gx = d.get('gyrox', d.get('lsm_gyro_x', '-'))
+    gy = d.get('gyroy', d.get('lsm_gyro_y', '-'))
+    gz = d.get('gyroz', d.get('lsm_gyro_z', '-'))
+    p.append(f"LSM6DS3[A:({ax},{ay},{az}) G:({gx},{gy},{gz})]")
+    
+    # BME280
+    p.append(f"BME280({d.get('bme_temp', '-')}C,{d.get('bme_hum', '-') }%,{d.get('bme_pres', '-')}hPa,{d.get('bme_alt', '-')}m)")
+    
+    # SEN0232
+    sl = d.get('sound_dbLeft', d.get('sound_db_left', '-'))
+    sr = d.get('sound_dbRight', d.get('sound_db_right', '-'))
+    p.append(f"Sound(L:{sl},R:{sr}dB)")
+    
+    return " | ".join(p)
+
+
 def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
     """Mengirim 1 paket biner/teks via AT+PSEND (Maks 245 Byte per paket)"""
     hex_payload = raw_bytes.hex().upper()
@@ -250,7 +283,6 @@ def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
         else:
             if ok_received:
                 time.sleep(0.01)
-                # Jika sudah OK dan lewat 120ms radio buffer biasanya sudah selesai
                 if (time.time() - start_time) > 0.12:
                     done_received = True
                     break
@@ -259,9 +291,9 @@ def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
 
     elapsed_ms = (time.time() - start_time) * 1000
     if done_received or ok_received:
-        return True, f"Terkirim dalam {elapsed_ms:.0f} ms"
+        return True, f"{elapsed_ms:.0f}ms"
     else:
-        return False, f"Timeout ({elapsed_ms:.0f} ms)! Respon: {log_responses}"
+        return False, f"Timeout! {log_responses}"
 
 
 def send_large_data_fragmented(ser, raw_bytes, chunk_size=185):
@@ -277,17 +309,15 @@ def send_large_data_fragmented(ser, raw_bytes, chunk_size=185):
     all_success = True
 
     for idx, chunk in enumerate(chunks):
-        # Format header: FRG:<part>/<total>:<payload>
         header = f"FRG:{idx+1}/{total_parts}:".encode('utf-8')
         packet = header + chunk
         
         ok, msg = send_single_raw_packet(ser, packet, timeout=1.5)
         if not ok:
             all_success = False
-            print(f"      [WARN] Gagal fragmen [{idx+1}/{total_parts}]: {msg}")
             break
         
-        time.sleep(0.02)  # Jeda mini 20ms antar fragmen
+        time.sleep(0.02)
 
     total_ms = (time.time() - t_start) * 1000
     return all_success, total_parts, total_ms
@@ -300,7 +330,7 @@ def main():
 
     counter = 1
 
-    print(f"[INFO] Mulai transmisi 35 parameter sensor setiap {TX_INTERVAL} detik...")
+    print(f"[INFO] Transmisi 35 parameter sensor aktif setiap {TX_INTERVAL} detik.")
     print("Tekan Ctrl+C untuk berhenti.\n")
 
     try:
@@ -309,18 +339,18 @@ def main():
             timestamp = time.strftime('%H:%M:%S')
 
             if PAYLOAD_MODE == 'JSON_35_LONG':
-                # Mode data besar (>250 Byte, sekitar 745 Byte)
+                # Mode data besar (>250 Byte, sekitar 718 Byte)
                 data_dict = get_35_sensor_data(counter, NODE_ID)
                 json_bytes = json.dumps(data_dict, separators=(',', ':')).encode('utf-8')
                 total_bytes = len(json_bytes)
 
-                print(f"[{timestamp}] [TX] [Paket #{counter:04d}] Mengirim 35 Parameter Sensor ({total_bytes} Byte > 250B)...")
                 success, parts, ms = send_large_data_fragmented(ser, json_bytes, chunk_size=185)
+                h_str = format_35_horizontal(data_dict)
 
                 if success:
-                    print(f"   STATUS : [OK] BERHASIL TERKIRIM! ({parts} Fragmen LoRa, Total Waktu: {ms:.0f} ms)")
+                    print(f"[{timestamp}] [TX #{counter:04d}] [{total_bytes}B {parts}Frg {ms:.0f}ms] -> {h_str}")
                 else:
-                    print(f"   STATUS : [WARN] Gagal sebagian fragmen")
+                    print(f"[{timestamp}] [TX #{counter:04d}] [WARN Gagal Sebagian Fragmen] -> {h_str}")
 
             else:
                 # Mode 1 paket tunggal 35 param CSV (~203 Byte)
@@ -329,10 +359,10 @@ def main():
                 csv_payload = f"CSV35:{counter}:{','.join(p_values)}".encode('utf-8')
 
                 success, msg = send_single_raw_packet(ser, csv_payload, timeout=2.0)
-                status_str = "[OK]" if success else "[WARN]"
-                print(f"[{timestamp}] {status_str} [Paket #{counter:04d}] 35 Param (Single Packet: {len(csv_payload)} Byte) -> {msg}")
+                h_str = format_35_horizontal(data_dict)
+                status_str = f"OK {msg}" if success else "WARN"
+                print(f"[{timestamp}] [TX #{counter:04d}] [CSV {len(csv_payload)}B {status_str}] -> {h_str}")
 
-            print("-" * 65)
             counter += 1
 
             # Hitung sisa jeda agar interval tepat

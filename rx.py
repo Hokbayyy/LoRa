@@ -4,11 +4,9 @@
 RAK3272S LoRa P2P Receiver (RX) Node - 35 Parameter Sensor (>250 Byte)
 =============================================================================
 Fitur:
-  - Menerima dan me-reassemble data besar (>250 Byte / ~745 Byte) otomatis
-  - Menampilkan 35 parameter sensor telemetri lengkap sesuai kategori:
-      * ARDUINO UNO Q: Lidar, MQ, DFRobot, MPU (Raw & Kalman), ADXL (Raw & Kalman)
-      * COSMIC LORA AURORA V3: LSM6DS3, BME280, SEN0232
-  - Mendukung mode single packet CSV (CSV35:) maupun JSON utuh
+  - Menerima dan me-reassemble data besar (>250 Byte / ~718 Byte) otomatis
+  - Menampilkan seluruh 35 parameter sensor dalam 1 BARIS HORIZONTAL PENUH
+  - Bebas emoji/emoticon (kompatibel penuh dengan terminal Linux/SSH)
 =============================================================================
 """
 
@@ -70,12 +68,12 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 
 def init_rak3272s_rx(port, baudrate):
-    print("=" * 68)
-    print("[INFO] INISIALISASI RECEIVER (RX) - 35 PARAMETER SENSOR (>250 BYTE)")
+    print("=" * 70)
+    print("[INFO] INISIALISASI RECEIVER (RX) - 35 PARAMETER SENSOR")
     print(f"   Raspberry Pi   : Port {port}")
     print("   Modul RAK3272S : UART2 (Header J4: Pin 7 TX2 & Pin 8 RX2)")
     print(f"   Frekuensi      : {P2P_FREQ / 1e6} MHz | BW: 125 kHz | SF: {P2P_SF}")
-    print("=" * 68)
+    print("=" * 70)
     
     try:
         ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
@@ -127,10 +125,7 @@ def init_rak3272s_rx(port, baudrate):
         ser.close()
         return None
         
-    print(f"   [OK] Konfigurasi Radio Aktif:")
-    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
-    print(f"      - Bandwidth   : 125 kHz")
-    print(f"      - Spreading F : SF{P2P_SF}")
+    print(f"   [OK] Konfigurasi Radio Aktif: {P2P_FREQ / 1e6} MHz | SF{P2P_SF} | BW 125kHz")
 
     # 4. Aktifkan Continuous RX
     print("[3/4] Mengaktifkan Mode Continuous RX (AT+PRECV=65534)...")
@@ -140,8 +135,8 @@ def init_rak3272s_rx(port, baudrate):
     else:
         print("   [OK] Receiver aktif mendengarkan gelombang radio.")
 
-    print("=" * 68)
-    print("[INFO] RECEIVER STANDBY MENDENGARKAN 35 PARAMETER DATA...")
+    print("=" * 70)
+    print("[INFO] RECEIVER SIAP MENERIMA (Format Output: Horizontal 1 Baris)")
     print("Tekan Ctrl+C untuk berhenti.\n")
     return ser
 
@@ -172,41 +167,39 @@ def parse_rx_event(line):
     return None
 
 
-def format_35_sensor_display(d):
-    """Menampilkan 35 parameter sensor dengan kategori rapi"""
-    lines = []
-    
-    # 1. ARDUINO UNO Q
-    lines.append("   [ARDUINO UNO Q]")
-    lines.append(f"      - P. Lidar   : Raw = {d.get('lidar_raw', '-')}")
-    lines.append(f"      - P. MQ      : NH3 = {d.get('mq_nh3', '-')} ppm | CO = {d.get('mq_co', '-')} ppm | CO2 = {d.get('mq_co2', '-')} ppm")
-    lines.append(f"      - P. DFRobot : Smoke = {d.get('smoke', '-')} ppm")
+def format_35_horizontal(d):
+    """Menyusun seluruh 35 parameter sensor menjadi 1 baris horizontal bersih"""
+    p = []
+    p.append(f"Lidar:{d.get('lidar_raw', '-')}")
+    p.append(f"MQ(NH3:{d.get('mq_nh3', '-')},CO:{d.get('mq_co', '-')},CO2:{d.get('mq_co2', '-')})")
+    p.append(f"Smoke:{d.get('smoke', '-')}")
     
     # MPU
-    lines.append(f"      - P. MPU Raw : Accel = ({d.get('mpu_acc_x_raw', '-')}, {d.get('mpu_acc_y_raw', '-')}, {d.get('mpu_acc_z_raw', '-')}) g")
-    lines.append(f"                     Gyro  = ({d.get('mpu_gyro_x_raw', '-')}, {d.get('mpu_gyro_y_raw', '-')}, {d.get('mpu_gyro_z_raw', '-')}) dps")
-    lines.append(f"      - P. MPU Klmn: Accel = ({d.get('mpu_acc_x_kalman', '-')}, {d.get('mpu_acc_y_kalman', '-')}, {d.get('mpu_acc_z_kalman', '-')}) g")
-    lines.append(f"                     Gyro  = ({d.get('mpu_gyro_x_kalman', '-')}, {d.get('mpu_gyro_y_kalman', '-')}, {d.get('mpu_gyro_z_kalman', '-')}) dps")
+    p.append(f"MPU_Raw[A:({d.get('mpu_acc_x_raw', '-')},{d.get('mpu_acc_y_raw', '-')},{d.get('mpu_acc_z_raw', '-')}) G:({d.get('mpu_gyro_x_raw', '-')},{d.get('mpu_gyro_y_raw', '-')},{d.get('mpu_gyro_z_raw', '-')})]")
+    p.append(f"MPU_Klm[A:({d.get('mpu_acc_x_kalman', '-')},{d.get('mpu_acc_y_kalman', '-')},{d.get('mpu_acc_z_kalman', '-')}) G:({d.get('mpu_gyro_x_kalman', '-')},{d.get('mpu_gyro_y_kalman', '-')},{d.get('mpu_gyro_z_kalman', '-')})]")
     
     # ADXL
-    lines.append(f"      - P. ADXL Raw: Accel = ({d.get('adxl_acc_x_raw', '-')}, {d.get('adxl_acc_y_raw', '-')}, {d.get('adxl_acc_z_raw', '-')}) g")
-    lines.append(f"      - P. ADXL Klm: Accel = ({d.get('adxl_acc_x_kalman', '-')}, {d.get('adxl_acc_y_kalman', '-')}, {d.get('adxl_acc_z_kalman', '-')}) g")
+    p.append(f"ADXL_Raw:({d.get('adxl_acc_x_raw', '-')},{d.get('adxl_acc_y_raw', '-')},{d.get('adxl_acc_z_raw', '-')})")
+    p.append(f"ADXL_Klm:({d.get('adxl_acc_x_kalman', '-')},{d.get('adxl_acc_y_kalman', '-')},{d.get('adxl_acc_z_kalman', '-')})")
     
-    # 2. COSMIC LORA AURORA V3
-    lines.append("   [COSMIC LORA AURORA V3]")
+    # LSM6DS3
     ax = d.get('accelx', d.get('lsm_accel_x', '-'))
     ay = d.get('accely', d.get('lsm_accel_y', '-'))
     az = d.get('accelz', d.get('lsm_accel_z', '-'))
     gx = d.get('gyrox', d.get('lsm_gyro_x', '-'))
     gy = d.get('gyroy', d.get('lsm_gyro_y', '-'))
     gz = d.get('gyroz', d.get('lsm_gyro_z', '-'))
-    lines.append(f"      - P. LSM6DS3 : Accel = ({ax}, {ay}, {az}) g | Gyro = ({gx}, {gy}, {gz}) dps")
-    lines.append(f"      - P. BME280  : Temp = {d.get('bme_temp', '-')} C | Hum = {d.get('bme_hum', '-')} % | Pres = {d.get('bme_pres', '-')} hPa | Alt = {d.get('bme_alt', '-')} m")
-    s_l = d.get('sound_dbLeft', d.get('sound_db_left', '-'))
-    s_r = d.get('sound_dbRight', d.get('sound_db_right', '-'))
-    lines.append(f"      - P. SEN0232 : Sound Left = {s_l} dB | Sound Right = {s_r} dB")
+    p.append(f"LSM6DS3[A:({ax},{ay},{az}) G:({gx},{gy},{gz})]")
     
-    return "\n".join(lines)
+    # BME280
+    p.append(f"BME280({d.get('bme_temp', '-')}C,{d.get('bme_hum', '-') }%,{d.get('bme_pres', '-')}hPa,{d.get('bme_alt', '-')}m)")
+    
+    # SEN0232
+    sl = d.get('sound_dbLeft', d.get('sound_db_left', '-'))
+    sr = d.get('sound_dbRight', d.get('sound_db_right', '-'))
+    p.append(f"Sound(L:{sl},R:{sr}dB)")
+    
+    return " | ".join(p)
 
 
 SENSOR_35_KEYS = [
@@ -228,7 +221,7 @@ def main():
 
     packet_count = 0
     buffer = ""
-    frag_buffer = {}  # {part_num: chunk_bytes}
+    frag_buffer = {}
     expected_total_parts = 0
     last_rssi = None
     last_snr = None
@@ -259,10 +252,9 @@ def main():
                             except Exception:
                                 continue
 
-                            # 1. Cek apakah ini bagian dari data terfragmen (>250 Byte)
+                            # 1. Bagian dari data terfragmen (>250 Byte / JSON 35 Param)
                             if raw_bytes.startswith(b"FRG:"):
                                 try:
-                                    # Format: FRG:1/4:payload
                                     meta_part, chunk_data = raw_bytes[4:].split(b":", 1)
                                     part_str, total_str = meta_part.decode('utf-8').split("/")
                                     part_num = int(part_str)
@@ -274,9 +266,7 @@ def main():
                                     expected_total_parts = total_parts
                                     frag_buffer[part_num] = chunk_data
 
-                                    print(f"[{timestamp}] [FRG] Fragmen Diterima [{part_num}/{total_parts}] ({len(chunk_data)}B) | RSSI: {last_rssi} dBm, SNR: {last_snr} dB")
-
-                                    # Jika semua fragmen sudah lengkap, reassemble!
+                                    # Jika semua fragmen sudah lengkap, cetak 1 baris horizontal!
                                     if len(frag_buffer) == expected_total_parts:
                                         full_raw = b"".join([frag_buffer[p] for p in sorted(frag_buffer.keys())])
                                         total_size = len(full_raw)
@@ -284,29 +274,19 @@ def main():
 
                                         try:
                                             full_json = json.loads(full_raw.decode('utf-8'))
-                                            node = full_json.get('node', 1)
                                             cnt = full_json.get('cnt', packet_count)
-                                            param_count = len(full_json) - 2
-
-                                            print("=" * 68)
-                                            print(f"[{timestamp}] [OK] SUKSES REASSEMBLE! DATA BESAR DITERIMA (#{packet_count})")
-                                            print(f"   Ukuran Total  : {total_size} Byte (Jauh > 250 Byte!)")
-                                            print(f"   Jumlah Param  : {param_count} Parameter Sensor")
-                                            print(f"   Sinyal Radio  : RSSI = {last_rssi} dBm | SNR = {last_snr} dB")
-                                            print(f"   Node / Counter: Node {node} | Counter #{cnt}")
-                                            print("   Rincian 35 Parameter Sensor:")
-                                            print(format_35_sensor_display(full_json))
-                                            print("=" * 68 + "\n")
+                                            h_str = format_35_horizontal(full_json)
+                                            print(f"[{timestamp}] [RX #{cnt:04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [{total_size}B] -> {h_str}")
                                         except Exception as e:
-                                            print(f"   [Reassemble JSON Error]: {e}")
+                                            print(f"[{timestamp}] [RX ERROR Reassemble JSON]: {e}")
 
                                         frag_buffer = {}
                                         expected_total_parts = 0
 
                                 except Exception as err:
-                                    print(f"   [Fragment Parse Error]: {err}")
+                                    print(f"[{timestamp}] [RX ERROR Fragment Parse]: {err}")
 
-                            # 2. Cek apakah format CSV 35 Parameter (Mode Single Packet)
+                            # 2. Format CSV 35 Parameter (Mode Single Packet)
                             elif raw_bytes.startswith(b"CSV35:"):
                                 packet_count += 1
                                 raw_str = raw_bytes.decode('utf-8', errors='ignore')
@@ -314,37 +294,22 @@ def main():
                                 p_cnt = parts[1] if len(parts) > 1 else '?'
                                 values = parts[2].split(',') if len(parts) > 2 else []
 
-                                # Susun dictionary dari CSV
                                 d_csv = {"node": 1, "cnt": p_cnt}
                                 for idx, val in enumerate(values):
                                     if idx < len(SENSOR_35_KEYS):
                                         d_csv[SENSOR_35_KEYS[idx]] = val
 
-                                print("=" * 68)
-                                print(f"[{timestamp}] [OK] DATA 35 PARAMETER DITERIMA (Single Packet #{packet_count})")
-                                print(f"   Ukuran Paket  : {len(raw_bytes)} Byte (Format CSV)")
-                                print(f"   Sinyal Radio  : RSSI = {last_rssi} dBm | SNR = {last_snr} dB")
-                                print(f"   Counter       : #{p_cnt}")
-                                print("   Rincian 35 Parameter Sensor:")
-                                print(format_35_sensor_display(d_csv))
-                                print("=" * 68 + "\n")
+                                h_str = format_35_horizontal(d_csv)
+                                print(f"[{timestamp}] [RX #{int(p_cnt):04d}] [RSSI:{last_rssi}dBm SNR:{last_snr}dB] [CSV {len(raw_bytes)}B] -> {h_str}")
 
                             # 3. Payload JSON kecil / teks biasa (Kompatibilitas lama)
                             else:
                                 packet_count += 1
                                 try:
                                     text = raw_bytes.decode('utf-8')
-                                    # Coba parse sebagai json biasa jika ada
-                                    if text.startswith('{') and text.endswith('}'):
-                                        js = json.loads(text)
-                                        print("=" * 68)
-                                        print(f"[{timestamp}] [RX] Paket #{packet_count} (JSON Standar {len(raw_bytes)}B) | RSSI: {last_rssi} dBm")
-                                        print(f"   Data: {js}")
-                                        print("=" * 68 + "\n")
-                                    else:
-                                        print(f"[{timestamp}] [RX] [Paket #{packet_count}] ({len(raw_bytes)}B): {text[:80]} | RSSI:{last_rssi}dBm")
+                                    print(f"[{timestamp}] [RX #{packet_count:04d}] [RSSI:{last_rssi}dBm] ({len(raw_bytes)}B): {text}")
                                 except Exception:
-                                    print(f"[{timestamp}] [RX] [Paket #{packet_count}] ({len(raw_bytes)}B Hex): {parsed['hex'][:60]} | RSSI:{last_rssi}dBm")
+                                    print(f"[{timestamp}] [RX #{packet_count:04d}] [RSSI:{last_rssi}dBm] ({len(raw_bytes)}B Hex): {parsed['hex']}")
 
             time.sleep(0.002)
 
