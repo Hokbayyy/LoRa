@@ -1,39 +1,50 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Transmitter (TX) Node - 30 Parameter Sensor (>250 Byte)
+RAK3272S LoRa P2P Transmitter (TX) Node - 35 Parameter Sensor (>250 Byte)
 =============================================================================
-Konfigurasi:
-  - Raspberry Pi 5  : UART3 (/dev/ttyAMA3)
-  - Modul RAK3272S  : UART1 (Header J5: Pin 5 RX1 & Pin 6 TX1)
-  - Frekuensi       : 923.2 MHz (AS923) | SF: 7 | BW: 125 kHz
-  - Payload         : 30 Parameter Sensor Lengkap (508 Byte)
-=============================================================================
+Daftar Parameter Sensor (Total 35 Parameter Sesuai Permintaan):
+  [A] ARDUINO UNO Q:
+      1. P. Lidar   : Raw
+      2. P. MQ      : Amonia (NH3), Karbon Monoksida (CO), Karbon Dioksida (CO2)
+      3. P. DFRobot : SMOKE
+      4. P. MPU     : Akselerasi Sumbu X/Y/Z (Raw & Kalman), 
+                      Angular Sumbu X/Y/Z (Raw & Kalman) -> 12 Parameter
+      5. P. ADXL    : Akselerasi Sumbu X/Y/Z (Raw & Kalman) -> 6 Parameter
+
+  [B] COSMIC LORA AURORA V3:
+      6. P. LSM6DS3 : accelx, accely, accelz, gyrox, gyroy, gyroz -> 6 Param
+      7. P. BME280  : bme_temp, bme_hum, bme_pres, bme_alt -> 4 Param
+      8. P. SEN0232 : sound_dbLeft, sound_dbRight -> 2 Param
+
+Total Ukuran Payload: ~745 Byte (Jauh melampaui batas LoRa 250 Byte!).
+Sistem secara cerdas memecah paket (Auto-Fragmentation) dan mengirimkannya
+dengan kecepatan tinggi (sub-detik).
+
 Penggunaan:
-  python3 tx.py                 (Default: 30 parameter, interval 1 detik)
-  python3 tx.py 0.5             (Interval 0.5 detik)
-  python3 tx.py 1 single        (Mode 1 Paket Tunggal 245 Byte)
+  python3 tx.py                  (Default: 35 parameter JSON 745B, interval 1s)
+  python3 tx.py 0.5              (Transmisi super cepat tiap 0.5 detik)
+  python3 tx.py 1 single         (Mode 1 Paket Tunggal 35 Param CSV ~203B)
 =============================================================================
 """
 
 import serial
 import time
-import struct
 import json
 import sys
 import os
 
-# ================= Konfigurasi Port & Interval =================
+# ================= Konfigurasi Port & Radio =================
 DEFAULT_PORT = '/dev/ttyAMA3'
 SERIAL_PORT  = DEFAULT_PORT
-TX_INTERVAL  = 1.0  # Default: 1.0 detik
-PAYLOAD_MODE = '30_PARAMS_LONG'  # '30_PARAMS_LONG' (508B) atau '30_PARAMS_SINGLE_245B'
+TX_INTERVAL  = 1.0  # Default interval 1.0 detik
+PAYLOAD_MODE = 'JSON_35_LONG'  # 'JSON_35_LONG' (~745B) atau 'SINGLE_CSV_35' (~203B)
 
 # Pintar membaca argumen terminal
 args = sys.argv[1:]
 for arg in args:
     if arg == 'single':
-        PAYLOAD_MODE = '30_PARAMS_SINGLE_245B'
+        PAYLOAD_MODE = 'SINGLE_CSV_35'
     elif arg.startswith('/dev/'):
         SERIAL_PORT = arg
     else:
@@ -43,16 +54,15 @@ for arg in args:
             pass
 
 BAUDRATE = 115200
+NODE_ID  = 1
 
-# Pengaturan Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN RECEIVER)
+# Pengaturan Radio LoRa P2P (WAJIB SAMA PERSIS DENGAN RECEIVER)
 P2P_FREQ     = 923200000  # 923.2 MHz (AS923)
-P2P_SF       = 7          # SF7 (Spread Factor 6-12)
-P2P_BW       = 0          # 0: 125kHz
+P2P_SF       = 7          # SF7 (Paling cepat & responsif di 125kHz)
+P2P_BW       = 0          # 0: 125kHz (Standar stabil RUI3)
 P2P_CR       = 0          # 0: 4/5
 P2P_PREAMBLE = 8          # Preamble 8
 P2P_TXPOWER  = 20         # Tx Power 20 dBm
-
-NODE_ID      = 1          # ID Node Pengirim
 # =============================================================
 
 
@@ -80,10 +90,10 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 def init_rak3272s_tx(port, baudrate):
     print("=" * 65)
-    print("🚀 INISIALISASI TRANSMITTER (TX) - 30 PARAMETER")
+    print("🚀 INISIALISASI TRANSMITTER (TX) - 35 PARAMETER SENSOR")
     print(f"   Raspberry Pi 5 : UART3 ({port})")
     print(f"   Modul RAK3272S : UART1 (Header J5: Pin 5 RX1 & Pin 6 TX1)")
-    print(f"   Mode Payload   : {PAYLOAD_MODE}")
+    print(f"   Mode Transmisi : {PAYLOAD_MODE}")
     print(f"   Target Interval: {TX_INTERVAL} detik")
     print("=" * 65)
     
@@ -95,7 +105,7 @@ def init_rak3272s_tx(port, baudrate):
         return None
 
     # 1. Tes Komunikasi AT pada UART1
-    print("[1/4] Menguji komunikasi AT pada UART1 RAK3272S...")
+    print("[1/3] Menguji komunikasi AT pada UART1...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
         time.sleep(0.3)
@@ -104,7 +114,7 @@ def init_rak3272s_tx(port, baudrate):
             print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART1.")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi pada UART1.")
+    print("   ✅ Respon AT OK! Modul terdeteksi di UART1.")
 
     # 2. Cek Mode Kerja (Harus LoRa P2P / NWM=0)
     res_nwm = send_at_command(ser, "AT+NWM=?", timeout=1.0)
@@ -124,74 +134,93 @@ def init_rak3272s_tx(port, baudrate):
             print("   ❌ Gagal reboot ke mode P2P!")
             ser.close()
             return None
+        print("   ✅ Sukses beralih ke Mode P2P.")
     else:
         print("   ✅ Modul sudah berada dalam Mode P2P (NWM=0).")
 
-    # 3. Nonaktifkan mode listen jika sebelumnya aktif
-    send_at_command(ser, "AT+PRECV=0", timeout=0.3)
-
-    # 4. Konfigurasi Parameter Radio P2P
+    # 3. Konfigurasi Parameter Radio P2P
     p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
-    print(f"[2/4] Mengatur Parameter Radio P2P: {p2p_cmd}")
+    print(f"[2/3] Mengatur Parameter Radio P2P: {p2p_cmd}")
     res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
     if not any("OK" in line for line in res_p2p):
         print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
         ser.close()
         return None
         
-    print(f"   ✅ Parameter Radio Terkonfigurasi:")
-    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz (AS923)")
+    print(f"   ✅ Konfigurasi Radio Aktif:")
+    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
     print(f"      - Bandwidth   : 125 kHz")
     print(f"      - Spreading F : SF{P2P_SF}")
     print(f"      - Tx Power    : {P2P_TXPOWER} dBm")
 
     print("=" * 65)
-    print(f"📡 TRANSMITTER SIAP MENGIRIM 30 PARAMETER DATA!")
+    print("📡 TRANSMITTER SIAP MENGIRIM 35 PARAMETER SENSOR!")
     print("=" * 65 + "\n")
     return ser
 
 
-def generate_30_params(counter, node_id):
-    """Menghasilkan 30 parameter sensor telemetri realistis"""
+def get_35_sensor_data(counter, node_id=1):
+    """
+    Menghasilkan data lengkap 35 parameter sensor:
+    - Arduino Uno Q (23 Parameter)
+    - Cosmic LoRa Aurora V3 (12 Parameter)
+    """
     return {
         "node": node_id,
         "cnt": counter,
-        # 1-5: Suhu (deg C)
-        "temp_cpu": round(42.5 + (counter % 5) * 0.4, 2),
-        "temp_env": round(28.3 + (counter % 7) * 0.3, 2),
-        "temp_sensor": round(26.1 + (counter % 4) * 0.5, 2),
-        "temp_batt": round(31.0 + (counter % 6) * 0.2, 2),
-        "temp_motor": round(55.2 + (counter % 8) * 0.7, 2),
-        # 6-10: Kelembapan & Tekanan
-        "humidity": round(65.4 + (counter % 5) * 1.1, 2),
-        "soil_moist": round(45.2 + (counter % 4) * 0.8, 2),
-        "pressure_hpa": round(1013.25 + (counter % 3) * 0.5, 2),
-        "altitude_m": round(152.4 + (counter % 5) * 0.2, 2),
-        "dew_point": round(18.2 + (counter % 3) * 0.4, 2),
-        # 11-15: Listrik / Daya
-        "voltage_v": round(3.30 + (counter % 3) * 0.02, 2),
-        "current_ma": round(450.5 + (counter % 10) * 5.2, 1),
-        "power_mw": round(1485.0 + (counter % 10) * 12.0, 1),
-        "batt_pct": max(10, 100 - (counter % 90)),
-        "solar_v": round(5.12 + (counter % 4) * 0.1, 2),
-        # 16-20: Kualitas Udara & Lingkungan
-        "co2_ppm": 415 + (counter % 20) * 5,
-        "tvoc_ppb": 120 + (counter % 15) * 4,
-        "pm2_5": round(12.5 + (counter % 8) * 0.6, 1),
-        "pm10": round(25.4 + (counter % 9) * 0.8, 1),
-        "lux_light": 850 + (counter % 50) * 10,
-        # 21-25: Dinamika / Getaran / Akselerometer
-        "rpm": 1450 + (counter % 30) * 10,
-        "accel_x": round(0.02 + (counter % 5) * 0.01, 3),
-        "accel_y": round(-0.01 + (counter % 4) * 0.01, 3),
-        "accel_z": round(0.98 + (counter % 3) * 0.01, 3),
-        "vibration_g": round(0.12 + (counter % 6) * 0.02, 3),
-        # 26-30: Sensor Fluida & Posisi
-        "uv_index": round(3.2 + (counter % 4) * 0.2, 1),
-        "ph_level": round(6.85 + (counter % 3) * 0.05, 2),
-        "water_flow": round(15.4 + (counter % 5) * 0.3, 1),
-        "tank_level_pct": round(85.0 - (counter % 10) * 0.5, 1),
-        "gyro_z": round(0.15 + (counter % 5) * 0.05, 2)
+        
+        # === [1] ARDUINO UNO Q ===
+        # P. Lidar (1)
+        "lidar_raw": round(145.0 + (counter % 20) * 2.5, 1),
+        
+        # P. MQ (3)
+        "mq_nh3": round(12.4 + (counter % 10) * 0.3, 2),
+        "mq_co": round(4.2 + (counter % 8) * 0.1, 2),
+        "mq_co2": round(415.0 + (counter % 25) * 4.0, 1),
+        
+        # P. DFRobot (1)
+        "smoke": round(28.5 + (counter % 12) * 0.8, 1),
+        
+        # P. MPU (12 Parameter: 6 Raw + 6 Kalman)
+        "mpu_acc_x_raw": round(0.051 + (counter % 5) * 0.01, 3),
+        "mpu_acc_y_raw": round(-0.019 + (counter % 4) * 0.01, 3),
+        "mpu_acc_z_raw": round(0.982 + (counter % 3) * 0.01, 3),
+        "mpu_gyro_x_raw": round(1.24 + (counter % 6) * 0.05, 2),
+        "mpu_gyro_y_raw": round(-0.43 + (counter % 5) * 0.04, 2),
+        "mpu_gyro_z_raw": round(0.13 + (counter % 4) * 0.03, 2),
+        "mpu_acc_x_kalman": round(0.049 + (counter % 5) * 0.009, 3),
+        "mpu_acc_y_kalman": round(-0.020 + (counter % 4) * 0.009, 3),
+        "mpu_acc_z_kalman": round(0.980 + (counter % 3) * 0.008, 3),
+        "mpu_gyro_x_kalman": round(1.22 + (counter % 6) * 0.048, 2),
+        "mpu_gyro_y_kalman": round(-0.42 + (counter % 5) * 0.039, 2),
+        "mpu_gyro_z_kalman": round(0.12 + (counter % 4) * 0.029, 2),
+        
+        # P. ADXL (6 Parameter: 3 Raw + 3 Kalman)
+        "adxl_acc_x_raw": round(0.048 + (counter % 5) * 0.011, 3),
+        "adxl_acc_y_raw": round(-0.022 + (counter % 4) * 0.011, 3),
+        "adxl_acc_z_raw": round(0.979 + (counter % 3) * 0.009, 3),
+        "adxl_acc_x_kalman": round(0.050 + (counter % 5) * 0.010, 3),
+        "adxl_acc_y_kalman": round(-0.021 + (counter % 4) * 0.010, 3),
+        "adxl_acc_z_kalman": round(0.981 + (counter % 3) * 0.010, 3),
+        
+        # === [2] COSMIC LORA AURORA V3 ===
+        # P. LSM6DS3 (6 Parameter)
+        "accelx": round(0.052 + (counter % 5) * 0.01, 3),
+        "accely": round(-0.017 + (counter % 4) * 0.01, 3),
+        "accelz": round(0.985 + (counter % 3) * 0.01, 3),
+        "gyrox": round(1.26 + (counter % 6) * 0.05, 2),
+        "gyroy": round(-0.41 + (counter % 5) * 0.04, 2),
+        "gyroz": round(0.14 + (counter % 4) * 0.03, 2),
+        
+        # P. BME280 (4 Parameter)
+        "bme_temp": round(28.45 + (counter % 10) * 0.2, 2),
+        "bme_hum": round(62.3 + (counter % 8) * 0.5, 1),
+        "bme_pres": round(1013.25 + (counter % 6) * 0.3, 2),
+        "bme_alt": round(154.2 + (counter % 5) * 0.4, 1),
+        
+        # P. SEN0232 (2 Parameter)
+        "sound_dbLeft": round(54.2 + (counter % 15) * 0.8, 1),
+        "sound_dbRight": round(56.1 + (counter % 15) * 0.9, 1)
     }
 
 
@@ -213,55 +242,54 @@ def send_single_raw_packet(ser, raw_bytes, timeout=2.0):
             line = ser.readline().decode('utf-8', errors='ignore').strip()
             if line:
                 log_responses.append(line)
-                if "+EVT:TXP2P" in line:
-                    done_received = True
-                    break
                 if "OK" in line:
                     ok_received = True
-                if "AT_BUSY_ERROR" in line:
-                    return False, f"Modul Sibuk ({line})"
-                if "AT_PARAM_ERROR" in line or "AT_ERROR" in line:
-                    return False, f"Error Parameter ({line})"
+                if "+EVT:TXP2P DONE" in line or "+EVT:TX_DONE" in line:
+                    done_received = True
+                    break
         else:
-            if ok_received and (time.time() - start_time) >= 0.12:
-                done_received = True
-                break
-        time.sleep(0.005)
+            if ok_received:
+                time.sleep(0.01)
+                # Jika sudah OK dan lewat 120ms radio buffer biasanya sudah selesai
+                if (time.time() - start_time) > 0.12:
+                    done_received = True
+                    break
+            else:
+                time.sleep(0.005)
 
     elapsed_ms = (time.time() - start_time) * 1000
-
     if done_received or ok_received:
-        return True, f"DONE ({elapsed_ms:.0f} ms)"
+        return True, f"Terkirim dalam {elapsed_ms:.0f} ms"
     else:
         return False, f"Timeout ({elapsed_ms:.0f} ms)! Respon: {log_responses}"
 
 
-def send_large_data_fragmented(ser, raw_bytes, chunk_size=180):
+def send_large_data_fragmented(ser, raw_bytes, chunk_size=185):
     """
     Memecah data besar (>250 Byte) menjadi paket-paket terfragmen
     sehingga muat di batas buffer chip LoRa SX1262 (Maks 256B)
     """
-    chunks = [raw_bytes[i:i + chunk_size] for i in range(0, len(raw_bytes), chunk_size)]
+    total_len = len(raw_bytes)
+    chunks = [raw_bytes[i:i + chunk_size] for i in range(0, total_len, chunk_size)]
     total_parts = len(chunks)
+    
+    t_start = time.time()
     all_success = True
-    total_ms = 0
 
     for idx, chunk in enumerate(chunks):
-        tag = f"FRG:{idx + 1}/{total_parts}:".encode('utf-8')
-        packet = tag + chunk
+        # Format header: FRG:<part>/<total>:<payload>
+        header = f"FRG:{idx+1}/{total_parts}:".encode('utf-8')
+        packet = header + chunk
         
-        t0 = time.time()
-        success, msg = send_single_raw_packet(ser, packet, timeout=2.0)
-        dt = (time.time() - t0) * 1000
-        total_ms += dt
-
-        if not success:
+        ok, msg = send_single_raw_packet(ser, packet, timeout=1.5)
+        if not ok:
             all_success = False
             print(f"      ⚠️ Gagal fragmen [{idx+1}/{total_parts}]: {msg}")
             break
         
-        time.sleep(0.03)  # Jeda mini 30ms antar fragmen
+        time.sleep(0.02)  # Jeda mini 20ms antar fragmen
 
+    total_ms = (time.time() - t_start) * 1000
     return all_success, total_parts, total_ms
 
 
@@ -271,9 +299,8 @@ def main():
         sys.exit(1)
 
     counter = 1
-    t_start_all = time.time()
 
-    print(f"Transmisi aktif setiap {TX_INTERVAL} detik (Mode: {PAYLOAD_MODE})...")
+    print(f"Mulai transmisi 35 parameter sensor setiap {TX_INTERVAL} detik...")
     print("Tekan Ctrl+C untuk berhenti.\n")
 
     try:
@@ -281,51 +308,44 @@ def main():
             t_pkt_start = time.time()
             timestamp = time.strftime('%H:%M:%S')
 
-            if PAYLOAD_MODE == '30_PARAMS_LONG':
-                # Mode data besar (>250 Byte, sekitar 508 Byte)
-                data_dict = generate_30_params(counter, NODE_ID)
+            if PAYLOAD_MODE == 'JSON_35_LONG':
+                # Mode data besar (>250 Byte, sekitar 745 Byte)
+                data_dict = get_35_sensor_data(counter, NODE_ID)
                 json_bytes = json.dumps(data_dict, separators=(',', ':')).encode('utf-8')
                 total_bytes = len(json_bytes)
 
-                print(f"[{timestamp}] 📤 [Paket #{counter:04d}] Mengirim 30 Parameter ({total_bytes} Byte > 250B)...")
-                success, parts, ms = send_large_data_fragmented(ser, json_bytes, chunk_size=180)
+                print(f"[{timestamp}] 📤 [Paket #{counter:04d}] Mengirim 35 Parameter Sensor ({total_bytes} Byte > 250B)...")
+                success, parts, ms = send_large_data_fragmented(ser, json_bytes, chunk_size=185)
 
                 if success:
-                    print(f"   STATUS : ⚡ SUKSES TERKIRIM! (Terbagi dalam {parts} Fragmen, Waktu Total: {ms:.0f} ms)")
+                    print(f"   STATUS : ⚡ BERHASIL TERKIRIM! ({parts} Fragmen LoRa, Total Waktu: {ms:.0f} ms)")
                 else:
                     print(f"   STATUS : ⚠️ Gagal sebagian fragmen")
 
             else:
-                # Mode 1 paket tunggal pas 245 Byte
-                data_dict = generate_30_params(counter, NODE_ID)
-                p_values = [str(v) for k, v in data_dict.items() if k not in ('node', 'cnt')][:30]
-                csv_payload = f"P30:{counter}:{','.join(p_values)}"
-                # Pad ke tepat 245 byte (batas fisik LoRa 256B)
-                pad_len = 245 - len(csv_payload)
-                padded_bytes = (csv_payload + '#' * max(0, pad_len))[:245].encode('utf-8')
+                # Mode 1 paket tunggal 35 param CSV (~203 Byte)
+                data_dict = get_35_sensor_data(counter, NODE_ID)
+                p_values = [str(v) for k, v in data_dict.items() if k not in ('node', 'cnt')]
+                csv_payload = f"CSV35:{counter}:{','.join(p_values)}".encode('utf-8')
 
-                success, msg = send_single_raw_packet(ser, padded_bytes, timeout=2.0)
+                success, msg = send_single_raw_packet(ser, csv_payload, timeout=2.0)
                 status_icon = "⚡" if success else "⚠️"
-                print(f"[{timestamp}] {status_icon} [Paket #{counter:04d}] 30 Parameter (Single Packet: {len(padded_bytes)} Byte) -> {msg}")
+                print(f"[{timestamp}] {status_icon} [Paket #{counter:04d}] 35 Param (Single Packet: {len(csv_payload)} Byte) -> {msg}")
 
             print("-" * 65)
             counter += 1
 
-            # Tunggu sisa waktu interval
+            # Hitung sisa jeda agar interval tepat
             elapsed = time.time() - t_pkt_start
-            sleep_time = max(0.0, TX_INTERVAL - elapsed)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            sleep_time = max(0.01, TX_INTERVAL - elapsed)
+            time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        total_time = time.time() - t_start_all
-        print(f"\n[TRANSMITTER] Selesai. Total {counter - 1} pengiriman dalam {total_time:.2f} detik.")
+        print(f"\n[TRANSMITTER] Dihentikan oleh pengguna. Total {counter - 1} data terkirim.")
     finally:
         if ser and ser.is_open:
-            ser.write(b"AT+PRECV=0\r\n")
-            ser.flush()
             ser.close()
-            print("Port serial ditutup.")
+            print("Serial port UART1 ditutup.")
 
 
 if __name__ == '__main__':
