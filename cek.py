@@ -23,7 +23,7 @@ else:
 BAUDRATE = 115200
 
 print("=" * 65)
-print(f"📡 MENGUJI RESPON AT MODUL RAK3272S")
+print(f"[INFO] MENGUJI RESPON AT MODUL RAK3272S")
 print(f"   Port Serial : {PORT} ({BAUDRATE} bps)")
 print("=" * 65)
 
@@ -64,20 +64,20 @@ try:
     print("-" * 65)
 
     if b"OK" in response or "OK" in text:
-        print(f"🎉 BERHASIL! RAK3272S merespon 'OK' dengan sempurna pada {PORT}!")
+        print(f"[OK] BERHASIL! RAK3272S merespon 'OK' dengan sempurna pada {PORT}!")
         
         # Cek versi firmware
         ser.write(b"AT+VER=?\r\n")
         ser.flush()
         time.sleep(0.3)
         ver = ser.read_all().decode('utf-8', errors='replace').strip()
-        print(f"ℹ️  Firmware: {ver}")
+        print(f"[INFO] Firmware: {ver}")
     else:
-        print("⚠️ Belum ada respon OK. Periksa kembali sambungan kabel TX/RX.")
+        print("[WARN] Belum ada respon OK. Periksa kembali sambungan kabel TX/RX.")
 
     ser.close()
 
 except Exception as e:
-    print(f"❌ Error membuka port {PORT}: {e}")
+    print(f"[ERROR] Error membuka port {PORT}: {e}")
 
 print("=" * 65)

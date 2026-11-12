@@ -71,7 +71,7 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 def init_rak3272s_rx(port, baudrate):
     print("=" * 68)
-    print("📥 INISIALISASI RECEIVER (RX) - 35 PARAMETER SENSOR (>250 BYTE)")
+    print("[INFO] INISIALISASI RECEIVER (RX) - 35 PARAMETER SENSOR (>250 BYTE)")
     print(f"   Raspberry Pi   : Port {port}")
     print("   Modul RAK3272S : UART2 (Header J4: Pin 7 TX2 & Pin 8 RX2)")
     print(f"   Frekuensi      : {P2P_FREQ / 1e6} MHz | BW: 125 kHz | SF: {P2P_SF}")
@@ -80,7 +80,7 @@ def init_rak3272s_rx(port, baudrate):
     try:
         ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
     except Exception as e:
-        print(f"❌ GAGAL membuka port serial {port}!")
+        print(f"[ERROR] Gagal membuka port serial {port}!")
         print(f"   Detail Error : {e}")
         return None
 
@@ -91,10 +91,10 @@ def init_rak3272s_rx(port, baudrate):
         time.sleep(0.3)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
-            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART2.")
+            print("   [ERROR] Modul RAK3272S tidak merespon perintah AT di UART2.")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi di UART2.")
+    print("   [OK] Respon AT OK! Modul terdeteksi di UART2.")
 
     # 2. Cek Mode Kerja (Harus LoRa P2P / NWM=0)
     res_nwm = send_at_command(ser, "AT+NWM=?", timeout=1.0)
@@ -104,14 +104,14 @@ def init_rak3272s_rx(port, baudrate):
             current_mode = line.split("=")[-1].strip()
             
     if current_mode != "0":
-        print("   ⚠️ Mengubah ke Mode P2P (AT+NWM=0)...")
+        print("   [WARN] Mengubah ke Mode P2P (AT+NWM=0)...")
         ser.write(b"AT+NWM=0\r\n")
         ser.flush()
         time.sleep(2.5)
         ser.reset_input_buffer()
         res_check = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res_check):
-            print("   ❌ Gagal reboot ke mode P2P!")
+            print("   [ERROR] Gagal reboot ke mode P2P!")
             ser.close()
             return None
 
@@ -123,11 +123,11 @@ def init_rak3272s_rx(port, baudrate):
     print(f"[2/4] Mengatur Parameter Radio P2P: {p2p_cmd}")
     res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
     if not any("OK" in line for line in res_p2p):
-        print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
+        print(f"   [ERROR] Gagal mengatur parameter P2P! Respon: {res_p2p}")
         ser.close()
         return None
         
-    print(f"   ✅ Konfigurasi Radio Aktif:")
+    print(f"   [OK] Konfigurasi Radio Aktif:")
     print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
     print(f"      - Bandwidth   : 125 kHz")
     print(f"      - Spreading F : SF{P2P_SF}")
@@ -136,12 +136,12 @@ def init_rak3272s_rx(port, baudrate):
     print("[3/4] Mengaktifkan Mode Continuous RX (AT+PRECV=65534)...")
     res_precv = send_at_command(ser, "AT+PRECV=65534", timeout=1.5)
     if not any("OK" in line for line in res_precv):
-        print(f"   ⚠️ Respon PRECV: {res_precv}")
+        print(f"   [WARN] Respon PRECV: {res_precv}")
     else:
-        print("   ✅ Receiver aktif mendengarkan gelombang radio.")
+        print("   [OK] Receiver aktif mendengarkan gelombang radio.")
 
     print("=" * 68)
-    print("📡 RECEIVER STANDBY MENDENGARKAN 35 PARAMETER DATA...")
+    print("[INFO] RECEIVER STANDBY MENDENGARKAN 35 PARAMETER DATA...")
     print("Tekan Ctrl+C untuk berhenti.\n")
     return ser
 
@@ -177,34 +177,34 @@ def format_35_sensor_display(d):
     lines = []
     
     # 1. ARDUINO UNO Q
-    lines.append("   📦 [ARDUINO UNO Q]")
-    lines.append(f"      🔹 P. Lidar   : Raw = {d.get('lidar_raw', '-')}")
-    lines.append(f"      🔹 P. MQ      : NH3 = {d.get('mq_nh3', '-')} ppm | CO = {d.get('mq_co', '-')} ppm | CO2 = {d.get('mq_co2', '-')} ppm")
-    lines.append(f"      🔹 P. DFRobot : Smoke = {d.get('smoke', '-')} ppm")
+    lines.append("   [ARDUINO UNO Q]")
+    lines.append(f"      - P. Lidar   : Raw = {d.get('lidar_raw', '-')}")
+    lines.append(f"      - P. MQ      : NH3 = {d.get('mq_nh3', '-')} ppm | CO = {d.get('mq_co', '-')} ppm | CO2 = {d.get('mq_co2', '-')} ppm")
+    lines.append(f"      - P. DFRobot : Smoke = {d.get('smoke', '-')} ppm")
     
     # MPU
-    lines.append(f"      🔹 P. MPU Raw : Accel = ({d.get('mpu_acc_x_raw', '-')}, {d.get('mpu_acc_y_raw', '-')}, {d.get('mpu_acc_z_raw', '-')}) g")
-    lines.append(f"                      Gyro  = ({d.get('mpu_gyro_x_raw', '-')}, {d.get('mpu_gyro_y_raw', '-')}, {d.get('mpu_gyro_z_raw', '-')}) dps")
-    lines.append(f"      🔹 P. MPU Klmn: Accel = ({d.get('mpu_acc_x_kalman', '-')}, {d.get('mpu_acc_y_kalman', '-')}, {d.get('mpu_acc_z_kalman', '-')}) g")
-    lines.append(f"                      Gyro  = ({d.get('mpu_gyro_x_kalman', '-')}, {d.get('mpu_gyro_y_kalman', '-')}, {d.get('mpu_gyro_z_kalman', '-')}) dps")
+    lines.append(f"      - P. MPU Raw : Accel = ({d.get('mpu_acc_x_raw', '-')}, {d.get('mpu_acc_y_raw', '-')}, {d.get('mpu_acc_z_raw', '-')}) g")
+    lines.append(f"                     Gyro  = ({d.get('mpu_gyro_x_raw', '-')}, {d.get('mpu_gyro_y_raw', '-')}, {d.get('mpu_gyro_z_raw', '-')}) dps")
+    lines.append(f"      - P. MPU Klmn: Accel = ({d.get('mpu_acc_x_kalman', '-')}, {d.get('mpu_acc_y_kalman', '-')}, {d.get('mpu_acc_z_kalman', '-')}) g")
+    lines.append(f"                     Gyro  = ({d.get('mpu_gyro_x_kalman', '-')}, {d.get('mpu_gyro_y_kalman', '-')}, {d.get('mpu_gyro_z_kalman', '-')}) dps")
     
     # ADXL
-    lines.append(f"      🔹 P. ADXL Raw: Accel = ({d.get('adxl_acc_x_raw', '-')}, {d.get('adxl_acc_y_raw', '-')}, {d.get('adxl_acc_z_raw', '-')}) g")
-    lines.append(f"      🔹 P. ADXL Klm: Accel = ({d.get('adxl_acc_x_kalman', '-')}, {d.get('adxl_acc_y_kalman', '-')}, {d.get('adxl_acc_z_kalman', '-')}) g")
+    lines.append(f"      - P. ADXL Raw: Accel = ({d.get('adxl_acc_x_raw', '-')}, {d.get('adxl_acc_y_raw', '-')}, {d.get('adxl_acc_z_raw', '-')}) g")
+    lines.append(f"      - P. ADXL Klm: Accel = ({d.get('adxl_acc_x_kalman', '-')}, {d.get('adxl_acc_y_kalman', '-')}, {d.get('adxl_acc_z_kalman', '-')}) g")
     
     # 2. COSMIC LORA AURORA V3
-    lines.append("   🌌 [COSMIC LORA AURORA V3]")
+    lines.append("   [COSMIC LORA AURORA V3]")
     ax = d.get('accelx', d.get('lsm_accel_x', '-'))
     ay = d.get('accely', d.get('lsm_accel_y', '-'))
     az = d.get('accelz', d.get('lsm_accel_z', '-'))
     gx = d.get('gyrox', d.get('lsm_gyro_x', '-'))
     gy = d.get('gyroy', d.get('lsm_gyro_y', '-'))
     gz = d.get('gyroz', d.get('lsm_gyro_z', '-'))
-    lines.append(f"      🔹 P. LSM6DS3 : Accel = ({ax}, {ay}, {az}) g | Gyro = ({gx}, {gy}, {gz}) dps")
-    lines.append(f"      🔹 P. BME280  : Temp = {d.get('bme_temp', '-')}°C | Hum = {d.get('bme_hum', '-')}% | Pres = {d.get('bme_pres', '-')} hPa | Alt = {d.get('bme_alt', '-')} m")
+    lines.append(f"      - P. LSM6DS3 : Accel = ({ax}, {ay}, {az}) g | Gyro = ({gx}, {gy}, {gz}) dps")
+    lines.append(f"      - P. BME280  : Temp = {d.get('bme_temp', '-')} C | Hum = {d.get('bme_hum', '-')} % | Pres = {d.get('bme_pres', '-')} hPa | Alt = {d.get('bme_alt', '-')} m")
     s_l = d.get('sound_dbLeft', d.get('sound_db_left', '-'))
     s_r = d.get('sound_dbRight', d.get('sound_db_right', '-'))
-    lines.append(f"      🔹 P. SEN0232 : Sound Left = {s_l} dB | Sound Right = {s_r} dB")
+    lines.append(f"      - P. SEN0232 : Sound Left = {s_l} dB | Sound Right = {s_r} dB")
     
     return "\n".join(lines)
 
@@ -274,7 +274,7 @@ def main():
                                     expected_total_parts = total_parts
                                     frag_buffer[part_num] = chunk_data
 
-                                    print(f"[{timestamp}] 📦 Fragmen Diterima [{part_num}/{total_parts}] ({len(chunk_data)}B) | RSSI: {last_rssi} dBm, SNR: {last_snr} dB")
+                                    print(f"[{timestamp}] [FRG] Fragmen Diterima [{part_num}/{total_parts}] ({len(chunk_data)}B) | RSSI: {last_rssi} dBm, SNR: {last_snr} dB")
 
                                     # Jika semua fragmen sudah lengkap, reassemble!
                                     if len(frag_buffer) == expected_total_parts:
@@ -289,7 +289,7 @@ def main():
                                             param_count = len(full_json) - 2
 
                                             print("=" * 68)
-                                            print(f"🎉 [{timestamp}] 📥 SUKSES REASSEMBLE! DATA BESAR DITERIMA (#{packet_count})")
+                                            print(f"[{timestamp}] [OK] SUKSES REASSEMBLE! DATA BESAR DITERIMA (#{packet_count})")
                                             print(f"   Ukuran Total  : {total_size} Byte (Jauh > 250 Byte!)")
                                             print(f"   Jumlah Param  : {param_count} Parameter Sensor")
                                             print(f"   Sinyal Radio  : RSSI = {last_rssi} dBm | SNR = {last_snr} dB")
@@ -321,7 +321,7 @@ def main():
                                         d_csv[SENSOR_35_KEYS[idx]] = val
 
                                 print("=" * 68)
-                                print(f"⚡ [{timestamp}] 📥 DATA 35 PARAMETER DITERIMA (Single Packet #{packet_count})")
+                                print(f"[{timestamp}] [OK] DATA 35 PARAMETER DITERIMA (Single Packet #{packet_count})")
                                 print(f"   Ukuran Paket  : {len(raw_bytes)} Byte (Format CSV)")
                                 print(f"   Sinyal Radio  : RSSI = {last_rssi} dBm | SNR = {last_snr} dB")
                                 print(f"   Counter       : #{p_cnt}")
@@ -338,13 +338,13 @@ def main():
                                     if text.startswith('{') and text.endswith('}'):
                                         js = json.loads(text)
                                         print("=" * 68)
-                                        print(f"📥 [{timestamp}] Paket #{packet_count} (JSON Standar {len(raw_bytes)}B) | RSSI: {last_rssi} dBm")
+                                        print(f"[{timestamp}] [RX] Paket #{packet_count} (JSON Standar {len(raw_bytes)}B) | RSSI: {last_rssi} dBm")
                                         print(f"   Data: {js}")
                                         print("=" * 68 + "\n")
                                     else:
-                                        print(f"[{timestamp}] 📥 [Paket #{packet_count}] ({len(raw_bytes)}B): {text[:80]} | RSSI:{last_rssi}dBm")
+                                        print(f"[{timestamp}] [RX] [Paket #{packet_count}] ({len(raw_bytes)}B): {text[:80]} | RSSI:{last_rssi}dBm")
                                 except Exception:
-                                    print(f"[{timestamp}] 📥 [Paket #{packet_count}] ({len(raw_bytes)}B Hex): {parsed['hex'][:60]} | RSSI:{last_rssi}dBm")
+                                    print(f"[{timestamp}] [RX] [Paket #{packet_count}] ({len(raw_bytes)}B Hex): {parsed['hex'][:60]} | RSSI:{last_rssi}dBm")
 
             time.sleep(0.002)
 

@@ -18,7 +18,7 @@ Daftar Parameter Sensor (Total 35 Parameter Sesuai Permintaan):
       8. P. SEN0232 : sound_dbLeft, sound_dbRight -> 2 Param
 
 Total Ukuran Payload: ~745 Byte (Jauh melampaui batas LoRa 250 Byte!).
-Sistem secara cerdas memecah paket (Auto-Fragmentation) dan mengirimkannya
+Sistem secara otomatis memecah paket (Auto-Fragmentation) dan mengirimkannya
 dengan kecepatan tinggi (sub-detik).
 
 Penggunaan:
@@ -40,7 +40,7 @@ SERIAL_PORT  = DEFAULT_PORT
 TX_INTERVAL  = 1.0  # Default interval 1.0 detik
 PAYLOAD_MODE = 'JSON_35_LONG'  # 'JSON_35_LONG' (~745B) atau 'SINGLE_CSV_35' (~203B)
 
-# Pintar membaca argumen terminal
+# Membaca argumen terminal
 args = sys.argv[1:]
 for arg in args:
     if arg == 'single':
@@ -90,7 +90,7 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 def init_rak3272s_tx(port, baudrate):
     print("=" * 65)
-    print("🚀 INISIALISASI TRANSMITTER (TX) - 35 PARAMETER SENSOR")
+    print("[INFO] INISIALISASI TRANSMITTER (TX) - 35 PARAMETER SENSOR")
     print(f"   Raspberry Pi 5 : UART3 ({port})")
     print(f"   Modul RAK3272S : UART1 (Header J5: Pin 5 RX1 & Pin 6 TX1)")
     print(f"   Mode Transmisi : {PAYLOAD_MODE}")
@@ -100,7 +100,7 @@ def init_rak3272s_tx(port, baudrate):
     try:
         ser = serial.Serial(port, baudrate=baudrate, timeout=1, rtscts=False)
     except Exception as e:
-        print(f"❌ GAGAL membuka port serial {port}!")
+        print(f"[ERROR] Gagal membuka port serial {port}!")
         print(f"   Detail Error : {e}")
         return None
 
@@ -111,10 +111,10 @@ def init_rak3272s_tx(port, baudrate):
         time.sleep(0.3)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
-            print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART1.")
+            print("   [ERROR] Modul RAK3272S tidak merespon perintah AT di UART1.")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi di UART1.")
+    print("   [OK] Respon AT OK! Modul terdeteksi di UART1.")
 
     # 2. Cek Mode Kerja (Harus LoRa P2P / NWM=0)
     res_nwm = send_at_command(ser, "AT+NWM=?", timeout=1.0)
@@ -124,37 +124,37 @@ def init_rak3272s_tx(port, baudrate):
             current_mode = line.split("=")[-1].strip()
             
     if current_mode != "0":
-        print("   ⚠️ Mengubah ke Mode P2P (AT+NWM=0)...")
+        print("   [WARN] Mengubah ke Mode P2P (AT+NWM=0)...")
         ser.write(b"AT+NWM=0\r\n")
         ser.flush()
         time.sleep(2.5)
         ser.reset_input_buffer()
         res_check = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res_check):
-            print("   ❌ Gagal reboot ke mode P2P!")
+            print("   [ERROR] Gagal reboot ke mode P2P!")
             ser.close()
             return None
-        print("   ✅ Sukses beralih ke Mode P2P.")
+        print("   [OK] Sukses beralih ke Mode P2P.")
     else:
-        print("   ✅ Modul sudah berada dalam Mode P2P (NWM=0).")
+        print("   [OK] Modul sudah berada dalam Mode P2P (NWM=0).")
 
     # 3. Konfigurasi Parameter Radio P2P
     p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
     print(f"[2/3] Mengatur Parameter Radio P2P: {p2p_cmd}")
     res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
     if not any("OK" in line for line in res_p2p):
-        print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
+        print(f"   [ERROR] Gagal mengatur parameter P2P! Respon: {res_p2p}")
         ser.close()
         return None
         
-    print(f"   ✅ Konfigurasi Radio Aktif:")
+    print(f"   [OK] Konfigurasi Radio Aktif:")
     print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
     print(f"      - Bandwidth   : 125 kHz")
     print(f"      - Spreading F : SF{P2P_SF}")
     print(f"      - Tx Power    : {P2P_TXPOWER} dBm")
 
     print("=" * 65)
-    print("📡 TRANSMITTER SIAP MENGIRIM 35 PARAMETER SENSOR!")
+    print("[INFO] TRANSMITTER SIAP MENGIRIM 35 PARAMETER SENSOR")
     print("=" * 65 + "\n")
     return ser
 
@@ -284,7 +284,7 @@ def send_large_data_fragmented(ser, raw_bytes, chunk_size=185):
         ok, msg = send_single_raw_packet(ser, packet, timeout=1.5)
         if not ok:
             all_success = False
-            print(f"      ⚠️ Gagal fragmen [{idx+1}/{total_parts}]: {msg}")
+            print(f"      [WARN] Gagal fragmen [{idx+1}/{total_parts}]: {msg}")
             break
         
         time.sleep(0.02)  # Jeda mini 20ms antar fragmen
@@ -300,7 +300,7 @@ def main():
 
     counter = 1
 
-    print(f"Mulai transmisi 35 parameter sensor setiap {TX_INTERVAL} detik...")
+    print(f"[INFO] Mulai transmisi 35 parameter sensor setiap {TX_INTERVAL} detik...")
     print("Tekan Ctrl+C untuk berhenti.\n")
 
     try:
@@ -314,13 +314,13 @@ def main():
                 json_bytes = json.dumps(data_dict, separators=(',', ':')).encode('utf-8')
                 total_bytes = len(json_bytes)
 
-                print(f"[{timestamp}] 📤 [Paket #{counter:04d}] Mengirim 35 Parameter Sensor ({total_bytes} Byte > 250B)...")
+                print(f"[{timestamp}] [TX] [Paket #{counter:04d}] Mengirim 35 Parameter Sensor ({total_bytes} Byte > 250B)...")
                 success, parts, ms = send_large_data_fragmented(ser, json_bytes, chunk_size=185)
 
                 if success:
-                    print(f"   STATUS : ⚡ BERHASIL TERKIRIM! ({parts} Fragmen LoRa, Total Waktu: {ms:.0f} ms)")
+                    print(f"   STATUS : [OK] BERHASIL TERKIRIM! ({parts} Fragmen LoRa, Total Waktu: {ms:.0f} ms)")
                 else:
-                    print(f"   STATUS : ⚠️ Gagal sebagian fragmen")
+                    print(f"   STATUS : [WARN] Gagal sebagian fragmen")
 
             else:
                 # Mode 1 paket tunggal 35 param CSV (~203 Byte)
@@ -329,8 +329,8 @@ def main():
                 csv_payload = f"CSV35:{counter}:{','.join(p_values)}".encode('utf-8')
 
                 success, msg = send_single_raw_packet(ser, csv_payload, timeout=2.0)
-                status_icon = "⚡" if success else "⚠️"
-                print(f"[{timestamp}] {status_icon} [Paket #{counter:04d}] 35 Param (Single Packet: {len(csv_payload)} Byte) -> {msg}")
+                status_str = "[OK]" if success else "[WARN]"
+                print(f"[{timestamp}] {status_str} [Paket #{counter:04d}] 35 Param (Single Packet: {len(csv_payload)} Byte) -> {msg}")
 
             print("-" * 65)
             counter += 1
