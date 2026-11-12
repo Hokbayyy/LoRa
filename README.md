@@ -1,28 +1,29 @@
-# Panduan Komunikasi LoRa P2P: 2x Raspberry Pi 5 (UART3) & RAK3272S (UART1)
+# Panduan Komunikasi LoRa P2P: 2x Raspberry Pi 5 (UART3) & RAK3272S (UART2)
 
 Proyek ini menyediakan implementasi lengkap komunikasi nirkabel **LoRa Point-to-Point (P2P)** antar dua perangkat **Raspberry Pi 5** yang masing-masing menggunakan modul **RAKwireless RAK3272S Breakout Board** (berbasis chip STM32WLE5CC dengan firmware RUI3).
 
 Konfigurasi Port:
 * **Raspberry Pi 5:** Menggunakan **UART3** (Pin 24 TX & Pin 21 RX) $\rightarrow$ `/dev/ttyAMA3`
-* **RAK3272S:** Menggunakan **UART1** (Header J5: Pin 6 TX1 & Pin 5 RX1)
+* **RAK3272S:** Menggunakan **UART2** (Header J4: Pin 7 TX2 & Pin 8 RX2)
+  *(Catatan: UART2 adalah satu-satunya port default pabrik RUI3 yang aktif merespon AT Command).*
 
 ---
 
 ## 📡 Skema Pengkabelan (Wiring Diagram)
 
-Semua koneksi ke modul RAK3272S berada di satu deret header yang sama, yaitu **Header J5**:
+Koneksi antara Raspberry Pi 5 dan Modul RAK3272S:
 
-| Pin Raspberry Pi 5 (40-Pin Header) | Fungsi Pin Pi 5 | Pin Modul RAK3272S (Header J5) | Fungsi RAK3272S | Keterangan |
+| Pin Raspberry Pi 5 (40-Pin Header) | Fungsi Pin Pi 5 | Pin Modul RAK3272S | Fungsi RAK3272S | Keterangan |
 | :--- | :--- | :--- | :--- | :--- |
 | **Pin 1** (atau Pin 17) | **3.3V Power** | **Header J5 Pin 9** | **3V3 (VDD)** | Tegangan kerja 3.3V (**JANGAN hubungkan ke 5V!**) |
-| **Pin 6** (atau Pin 9, 14, 20, 25) | **GND** | **Header J5 Pin 7** | **GND** | Ground bersama |
-| **Pin 24** (GPIO 8) | **UART3 TXD** | **Header J5 Pin 5** | **RX1** (UART1 RX) | Jalur TX Pi 5 $\rightarrow$ RX modul RAK |
-| **Pin 21** (GPIO 9) | **UART3 RXD** | **Header J5 Pin 6** | **TX1** (UART1 TX) | Jalur RX Pi 5 $\leftarrow$ TX modul RAK |
+| **Pin 6** (atau Pin 9, 14, 20, 25) | **GND** | **Header J4 Pin 4** (atau J5 Pin 7) | **GND** | Ground bersama |
+| **Pin 24** (GPIO 8) | **UART3 TXD** | **Header J4 Pin 8** | **RX2** (UART2 RX) | Jalur TX Pi 5 $\rightarrow$ RX modul RAK |
+| **Pin 21** (GPIO 9) | **UART3 RXD** | **Header J4 Pin 7** | **TX2** (UART2 TX) | Jalur RX Pi 5 $\leftarrow$ TX modul RAK |
 
-> 💡 **Kelebihan Menggunakan UART1 (Header J5):**
-> Keempat pin (3V3, GND, TX1, RX1) terkumpul rapi di **Header J5 saja**, tidak perlu menyilang atau memakai dua header berbeda.
+> ⚠️ **CATATAN PENTING MENGENAI PORT RAK3272S:**
+> Firmware pabrik RUI3 mengunci perintah AT **hanya pada UART2**. Port UART1 (Header J5) diset secara default ke mode *Custom Sensor*, sehingga tidak akan merespon perintah AT. Karena itu, kabel TX/RX dari Pi 5 **wajib ke Header J4 Pin 7 & 8 (UART2)**.
 >
-> ⚠️ **PERINGATAN KRUSIAL:**
+> ⚠️ **PERINGATAN ANTENA:**
 > Pasang **Antena LoRa** pada konektor IPEX/SMA RAK3272S **SEBELUM** menyalakan modul atau memprogram transmisi untuk mencegah kerusakan amplifier radio internal (PA).
 
 ---

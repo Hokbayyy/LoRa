@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Receiver (RAK: UART1 <--> Pi 5: UART3)
+RAK3272S LoRa P2P Receiver (RAK: UART2 <--> Pi 5: UART3)
 =============================================================================
 Penulis : Pasangan Pair-Programming Antigravity & User
 Deskripsi: Script penerima data LoRa Point-to-Point (P2P) menggunakan modul
-          RAKwireless RAK3272S (UART1 di Header J5) yang terhubung ke pin
+          RAKwireless RAK3272S (UART2 di Header J4) yang terhubung ke pin
           UART3 Raspberry Pi 5 (Pin 24 TX & Pin 21 RX -> /dev/ttyAMA3).
 =============================================================================
 """
@@ -77,7 +77,7 @@ def init_rak3272s_rx(port, baudrate):
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
             print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT.")
-            print("   👉 Periksa kabel: Pin 24 (Pi TX) -> Pin 5 J5 (RX1), Pin 21 (Pi RX) -> Pin 6 J5 (TX1).")
+            print("   👉 Periksa kabel: Pin 24 (Pi TX) -> Header J4 Pin 8 (RX2), Pin 21 (Pi RX) -> Header J4 Pin 7 (TX2).")
             ser.close()
             return None
     print("   ✅ Respon AT OK! Modul terdeteksi.")

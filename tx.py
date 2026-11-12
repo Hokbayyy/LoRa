@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Transmitter (RAK: UART1 <--> Pi 5: UART3)
+RAK3272S LoRa P2P Transmitter (RAK: UART2 <--> Pi 5: UART3)
 =============================================================================
 Penulis : Pasangan Pair-Programming Antigravity & User
 Deskripsi: Script pengirim data LoRa Point-to-Point (P2P) menggunakan modul
-          RAKwireless RAK3272S (UART1 di Header J5) yang terhubung ke pin
+          RAKwireless RAK3272S (UART2 di Header J4) yang terhubung ke pin
           UART3 Raspberry Pi 5 (Pin 24 TX & Pin 21 RX -> /dev/ttyAMA3).
 =============================================================================
 """
@@ -18,7 +18,7 @@ import sys
 
 # ================= Konfigurasi Port & Radio =================
 # Pi 5: UART3 diaktifkan via dtoverlay=uart3-pi5 (/dev/ttyAMA3)
-# RAK3272S: UART1 di Header J5 (Pin 5 RX1 & Pin 6 TX1)
+# RAK3272S: UART2 di Header J4 (Pin 8 RX2 & Pin 7 TX2)
 SERIAL_PORT = '/dev/ttyAMA3'
 BAUDRATE    = 115200
 
@@ -64,7 +64,7 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
 
 def init_rak3272s_tx(port, baudrate):
     print(f"\n{'='*60}")
-    print(f"🚀 INISIALISASI TRANSMITTER (Pi 5: UART3 <--> RAK: UART1)...")
+    print(f"🚀 INISIALISASI TRANSMITTER (Pi 5: UART3 <--> RAK: UART2)...")
     print(f"   Port Pi 5: {port} | Baudrate: {baudrate}")
     print(f"{'='*60}")
     
@@ -77,17 +77,17 @@ def init_rak3272s_tx(port, baudrate):
         return None
 
     # 1. Tes Komunikasi AT
-    print("[1/5] Menguji komunikasi AT dasar pada UART1 RAK...")
+    print("[1/5] Menguji komunikasi AT dasar pada UART2 RAK...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
         time.sleep(0.5)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
             print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT.")
-            print("   👉 Periksa kabel: Pin 24 Pi (TX) -> Pin 5 J5 (RX1), Pin 21 Pi (RX) -> Pin 6 J5 (TX1).")
+            print("   👉 Periksa kabel: Pin 24 Pi (TX) -> Header J4 Pin 8 (RX2), Pin 21 Pi (RX) -> Header J4 Pin 7 (TX2).")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi di UART1.")
+    print("   ✅ Respon AT OK! Modul terdeteksi di UART2.")
 
     # Tampilkan Versi Firmware
     ver = send_at_command(ser, "AT+VER=?", timeout=1.0)
