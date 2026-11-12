@@ -232,6 +232,10 @@ def main():
                                     part_num = int(part_str)
                                     total_parts = int(total_str)
 
+                                    # Reset buffer jika paket baru dimulai (part 1)
+                                    if part_num == 1:
+                                        frag_buffer = {}
+
                                     expected_total_parts = total_parts
                                     frag_buffer[part_num] = chunk_data
 
