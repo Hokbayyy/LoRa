@@ -22,7 +22,7 @@ candidate_ports.extend(glob.glob('/dev/ttyUSB*'))
 candidate_ports.extend(glob.glob('/dev/ttyACM*'))
 candidate_ports = list(dict.fromkeys(candidate_ports))
 
-baudrates = [115200, 9600, 57600]
+baudrates = [115200, 9600, 57600, 38400, 19200]
 
 print("=" * 65)
 print("🔍 MEMINDAI PORT SERIAL UNTUK MENDETEKSI RAK3272S...")
