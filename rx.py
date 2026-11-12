@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-RAK3272S LoRa P2P Receiver (RX) Node
+RAK3272S LoRa P2P Receiver (RX) Node - Mendukung Data Besar & 30 Parameter
 =============================================================================
-Konfigurasi Perangkat Keras:
-  - Modul RAK3272S  : UART2 (Header J4)
-                      Pin 7 (TX2) & Pin 8 (RX2)
-                      Tegangan 3.3V (Header J5 Pin 9) & GND (Header J4 Pin 4)
-  - Raspberry Pi    : Port Serial Default /dev/ttyAMA0 (UART0) atau /dev/ttyAMA3
-                      - Pi Pin 8  (GPIO 14 - TXD0) -> RAK Header J4 Pin 8 (RX2)
-                      - Pi Pin 10 (GPIO 15 - RXD0) <- RAK Header J4 Pin 7 (TX2)
-                      - Pi Pin 1  (3.3V)           -> RAK Header J5 Pin 9 (3V3)
-                      - Pi Pin 6  (GND)            -> RAK Header J4 Pin 4 (GND)
+Fitur:
+  - Menerima dan me-reassemble data besar (>250 Byte / 508 Byte) secara otomatis
+  - Menampilkan 30 parameter sensor telemetri lengkap
+  - Mendukung paket tunggal 245 Byte dan JSON standar
 =============================================================================
 """
 
@@ -23,7 +18,6 @@ import sys
 import os
 
 # ================= Konfigurasi Port & Radio =================
-# Daftar kandidat port serial di Raspberry Pi Receiver
 CANDIDATE_PORTS = [
     '/dev/ttyAMA0',
     '/dev/serial0',
@@ -31,11 +25,9 @@ CANDIDATE_PORTS = [
     '/dev/ttyUSB0'
 ]
 
-# Tentukan port serial: gunakan argumen command-line jika ada (misal: python3 rx.py /dev/ttyAMA0)
 if len(sys.argv) > 1:
     SERIAL_PORT = sys.argv[1]
 else:
-    # Cari port pertama yang tersedia dari daftar kandidat
     SERIAL_PORT = CANDIDATE_PORTS[0]
     for p in CANDIDATE_PORTS:
         if os.path.exists(p):
@@ -45,12 +37,11 @@ else:
 BAUDRATE = 115200
 
 # Pengaturan Radio LoRa P2P (WAJIB PERSIS SAMA DENGAN TRANSMITTER)
-# Frekuensi AS923 Indonesia: 923.2 MHz
-P2P_FREQ     = 923200000  # 923.2 MHz
+P2P_FREQ     = 923200000  # 923.2 MHz (AS923)
 P2P_SF       = 7          # SF7 (Spread Factor 6-12)
-P2P_BW       = 0          # 0: 125kHz, 1: 250kHz, 2: 500kHz
-P2P_CR       = 0          # 0: 4/5, 1: 4/6, 2: 4/7, 3: 4/8
-P2P_PREAMBLE = 8          # Preamble length (default 8)
+P2P_BW       = 0          # 0: 125kHz
+P2P_CR       = 0          # 0: 4/5
+P2P_PREAMBLE = 8          # Preamble 8
 P2P_TXPOWER  = 20         # Tx Power 20 dBm
 # =============================================================
 
@@ -72,16 +63,17 @@ def send_at_command(ser, cmd, timeout=1.5, expected=None):
                     break
                 if not expected and ("OK" in line or "AT_ERROR" in line or "AT_PARAM_ERROR" in line):
                     break
-        time.sleep(0.02)
+        time.sleep(0.005)
         
     return responses
 
 
 def init_rak3272s_rx(port, baudrate):
     print("=" * 65)
-    print("📥 INISIALISASI RECEIVER (RX)")
+    print("📥 INISIALISASI RECEIVER (RX) - SIAP MENERIMA >250 BYTE")
     print(f"   Raspberry Pi   : Port {port}")
     print("   Modul RAK3272S : UART2 (Header J4: Pin 7 TX2 & Pin 8 RX2)")
+    print(f"   Frekuensi      : {P2P_FREQ / 1e6} MHz | BW: 125 kHz | SF: {P2P_SF}")
     print("=" * 65)
     
     try:
@@ -89,30 +81,21 @@ def init_rak3272s_rx(port, baudrate):
     except Exception as e:
         print(f"❌ GAGAL membuka port serial {port}!")
         print(f"   Detail Error : {e}")
-        print("   👉 Anda bisa menentukan port secara manual, contoh: python3 rx.py /dev/ttyAMA0")
         return None
 
-    # 1. Tes Komunikasi AT pada UART2
-    print("[1/5] Menguji komunikasi AT pada UART2 RAK3272S...")
+    # 1. Tes Komunikasi AT
+    print("[1/4] Menguji komunikasi AT pada UART2...")
     res = send_at_command(ser, "AT", timeout=1.0)
     if not any("OK" in line for line in res):
-        time.sleep(0.5)
+        time.sleep(0.3)
         res = send_at_command(ser, "AT", timeout=1.0)
         if not any("OK" in line for line in res):
             print("   ❌ ERROR: Modul RAK3272S tidak merespon perintah AT di UART2.")
-            print("   👉 Periksa sambungan kabel:")
-            print(f"      - Pi TX ({port}) -> Header J4 Pin 8 (RX2)")
-            print(f"      - Pi RX ({port}) <- Header J4 Pin 7 (TX2)")
             ser.close()
             return None
-    print("   ✅ Respon AT OK! Modul terdeteksi pada UART2.")
-
-    # Tampilkan Versi Firmware
-    ver = send_at_command(ser, "AT+VER=?", timeout=1.0)
-    print(f"   ℹ️  Firmware Modul: {' '.join(ver)}")
+    print("   ✅ Respon AT OK! Modul terdeteksi di UART2.")
 
     # 2. Cek Mode Kerja (Harus LoRa P2P / NWM=0)
-    print("[2/5] Memeriksa Mode Kerja Modul (LoRa P2P)...")
     res_nwm = send_at_command(ser, "AT+NWM=?", timeout=1.0)
     current_mode = None
     for line in res_nwm:
@@ -120,7 +103,7 @@ def init_rak3272s_rx(port, baudrate):
             current_mode = line.split("=")[-1].strip()
             
     if current_mode != "0":
-        print("   ⚠️ Modul saat ini bukan mode P2P! Mengubah ke AT+NWM=0...")
+        print("   ⚠️ Mengubah ke Mode P2P (AT+NWM=0)...")
         ser.write(b"AT+NWM=0\r\n")
         ser.flush()
         time.sleep(2.5)
@@ -130,105 +113,76 @@ def init_rak3272s_rx(port, baudrate):
             print("   ❌ Gagal reboot ke mode P2P!")
             ser.close()
             return None
-        print("   ✅ Sukses beralih ke Mode P2P (Reboot selesai).")
-    else:
-        print("   ✅ Modul sudah berada dalam Mode P2P (NWM=0).")
+
+    # Matikan mode RX sebelumnya agar konfigurasi parameter tidak 'busy'
+    send_at_command(ser, "AT+PRECV=0", timeout=0.5)
 
     # 3. Konfigurasi Parameter Radio P2P
     p2p_cmd = f"AT+P2P={P2P_FREQ}:{P2P_SF}:{P2P_BW}:{P2P_CR}:{P2P_PREAMBLE}:{P2P_TXPOWER}"
-    print(f"[3/5] Mengatur Parameter Radio P2P: {p2p_cmd}")
+    print(f"[2/4] Mengatur Parameter Radio P2P: {p2p_cmd}")
     res_p2p = send_at_command(ser, p2p_cmd, timeout=1.5)
     if not any("OK" in line for line in res_p2p):
         print(f"   ❌ Gagal mengatur parameter P2P! Respon: {res_p2p}")
         ser.close()
         return None
         
-    print(f"   ✅ Parameter Radio Terkonfigurasi:")
-    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz (AS923)")
-    print(f"      - Spreading F : SF{P2P_SF}")
+    print(f"   ✅ Konfigurasi Radio Aktif:")
+    print(f"      - Frekuensi   : {P2P_FREQ / 1e6} MHz")
     print(f"      - Bandwidth   : 125 kHz")
-    print(f"      - Coding Rate : 4/5")
+    print(f"      - Spreading F : SF{P2P_SF}")
 
-    # 4. Aktifkan Mode Continuous RX (65534)
-    print("[4/5] Mengaktifkan Mode Continuous RX (AT+PRECV=65534)...")
+    # 4. Aktifkan Continuous RX
+    print("[3/4] Mengaktifkan Mode Continuous RX (AT+PRECV=65534)...")
     res_precv = send_at_command(ser, "AT+PRECV=65534", timeout=1.5)
     if not any("OK" in line for line in res_precv):
         print(f"   ⚠️ Respon PRECV: {res_precv}")
     else:
-        print("   ✅ Receiver aktif mendengarkan gelombang radio secara kontinu.")
-
-    print("[5/5] Memeriksa status akhir...")
-    p2p_status = send_at_command(ser, "AT+P2P=?", timeout=1.0)
-    print(f"   ℹ️  Status Radio: {' '.join(p2p_status)}")
+        print("   ✅ Receiver aktif mendengarkan gelombang radio.")
 
     print("=" * 65)
-    print("📡 RECEIVER RAK3272S (UART2) STANDBY MENDENGARKAN DATA...")
-    print("Menunggu paket dari Transmitter... (Tekan Ctrl+C untuk berhenti)")
-    print("=" * 65 + "\n")
+    print("📡 RECEIVER STANDBY MENDENGARKAN DATA 30 PARAMETER...")
+    print("Tekan Ctrl+C untuk berhenti.\n")
     return ser
-
-
-def decode_hex_payload(hex_str):
-    try:
-        raw_bytes = bytes.fromhex(hex_str)
-    except Exception:
-        return f"[Hex Raw Error] {hex_str}", len(hex_str) // 2
-
-    byte_len = len(raw_bytes)
-
-    # Deteksi Format 1: Text UTF-8 / JSON
-    try:
-        decoded_text = raw_bytes.decode('utf-8')
-        if decoded_text.startswith('{') and decoded_text.endswith('}'):
-            try:
-                parsed_json = json.loads(decoded_text)
-                return f"[JSON Telemetri]: {parsed_json}", byte_len
-            except json.JSONDecodeError:
-                pass
-        return f"[Plain Text]: \"{decoded_text}\"", byte_len
-    except UnicodeDecodeError:
-        pass
-
-    # Deteksi Format 2: Binary Struct (1 Byte Node ID + 120 uint16)
-    if byte_len == 241:
-        try:
-            node_id = raw_bytes[0]
-            values = struct.unpack('<120H', raw_bytes[1:])
-            preview = f"Sample: {values[:5]}... ({len(values)} parameter total)"
-            return f"[Binary 120 Params] Node ID: {node_id} | {preview}", byte_len
-        except Exception:
-            pass
-
-    return f"[Raw Hex]: {hex_str[:60]}{'...' if len(hex_str) > 60 else ''}", byte_len
 
 
 def parse_rx_event(line):
     if "+EVT:RXP2P" not in line:
         return None
 
-    rssi, snr, hex_payload = None, None, None
-
+    # Format RUI3: +EVT:RXP2P:<RSSI>:<SNR>:<Payload>
     if ":" in line:
         parts = line.split(":")
         if len(parts) >= 5:
-            rssi = parts[2].strip()
-            snr = parts[3].strip()
-            hex_payload = parts[4].strip()
+            return {
+                "rssi": parts[2].strip(),
+                "snr": parts[3].strip(),
+                "hex": parts[4].strip()
+            }
     
-    if not hex_payload and " " in line:
+    if " " in line:
         parts = line.split()
         if len(parts) >= 4:
-            rssi = parts[-3]
-            snr = parts[-2]
-            hex_payload = parts[-1]
+            return {
+                "rssi": parts[-3],
+                "snr": parts[-2],
+                "hex": parts[-1]
+            }
 
-    if hex_payload:
-        return {
-            "rssi": rssi,
-            "snr": snr,
-            "hex": hex_payload
-        }
     return None
+
+
+def format_30_params_display(data_dict):
+    """Menampilkan ringkasan 30 parameter sensor dengan rapi"""
+    lines = []
+    keys = [k for k in data_dict.keys() if k not in ('node', 'cnt')]
+    
+    # Kelompokkan per baris (3 parameter per baris)
+    for i in range(0, len(keys), 3):
+        chunk = keys[i:i+3]
+        item_str = " | ".join([f"{k}: {data_dict[k]}" for k in chunk])
+        lines.append(f"      🔹 {item_str}")
+        
+    return "\n".join(lines)
 
 
 def main():
@@ -238,6 +192,10 @@ def main():
 
     packet_count = 0
     buffer = ""
+    frag_buffer = {}  # {part_num: chunk_bytes}
+    expected_total_parts = 0
+    last_rssi = None
+    last_snr = None
 
     try:
         while True:
@@ -245,40 +203,105 @@ def main():
                 chunk = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
                 buffer += chunk
 
-                while '\r\n' in buffer:
-                    line, buffer = buffer.split('\r\n', 1)
-                    line = line.strip()
+                if '\n' in buffer:
+                    lines = buffer.split('\n')
+                    buffer = lines[-1]
 
-                    if not line:
-                        continue
+                    for raw_line in lines[:-1]:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
 
-                    parsed = parse_rx_event(line)
-                    if parsed:
-                        packet_count += 1
-                        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                        decoded_info, byte_len = decode_hex_payload(parsed['hex'])
-
-                        print(f"🎉 [{timestamp}] 📥 PAKET MASUK #{packet_count}")
-                        print(f"   Kualitas Sinyal : RSSI = {parsed['rssi']} dBm | SNR = {parsed['snr']} dB")
-                        print(f"   Ukuran Data     : {byte_len} Byte")
-                        print(f"   Isi Data        : {decoded_info}")
-                        print(f"   Hex Raw         : {parsed['hex'][:50]}{'...' if len(parsed['hex']) > 50 else ''}")
-                        print("-" * 65)
-                    else:
-                        if not line.startswith("OK"):
+                        parsed = parse_rx_event(line)
+                        if parsed:
+                            last_rssi = parsed['rssi']
+                            last_snr = parsed['snr']
                             timestamp = time.strftime('%H:%M:%S')
-                            print(f"[{timestamp}] [INFO/LOG RAK]: {line}")
 
-            time.sleep(0.01)
+                            try:
+                                raw_bytes = bytes.fromhex(parsed['hex'])
+                            except Exception:
+                                continue
+
+                            # 1. Cek apakah ini bagian dari data terfragmen (>250 Byte)
+                            if raw_bytes.startswith(b"FRG:"):
+                                try:
+                                    # Format: FRG:1/3:data...
+                                    meta_part, chunk_data = raw_bytes[4:].split(b":", 1)
+                                    part_str, total_str = meta_part.decode('utf-8').split("/")
+                                    part_num = int(part_str)
+                                    total_parts = int(total_str)
+
+                                    expected_total_parts = total_parts
+                                    frag_buffer[part_num] = chunk_data
+
+                                    print(f"[{timestamp}] 📦 Fragmen Diterima [{part_num}/{total_parts}] ({len(chunk_data)}B) | RSSI:{last_rssi}dBm SNR:{last_snr}dB")
+
+                                    # Jika semua fragmen sudah lengkap, reassemble!
+                                    if len(frag_buffer) == expected_total_parts:
+                                        full_raw = b"".join([frag_buffer[p] for p in sorted(frag_buffer.keys())])
+                                        total_size = len(full_raw)
+                                        packet_count += 1
+
+                                        try:
+                                            full_json = json.loads(full_raw.decode('utf-8'))
+                                            param_count = len(full_json) - 2  # kurangi node dan cnt
+
+                                            print("=" * 65)
+                                            print(f"🎉 [{timestamp}] 📥 SUKSES REASSEMBLE! DATA BESAR DITERIMA (#{packet_count})")
+                                            print(f"   Ukuran Total  : {total_size} Byte (> 250 Byte!)")
+                                            print(f"   Jumlah Param  : {param_count} Parameter Sensor Lengkap")
+                                            print(f"   Sinyal Radio  : RSSI = {last_rssi} dBm | SNR = {last_snr} dB")
+                                            print(f"   Node / Counter: Node {full_json.get('node', 1)} | Counter #{full_json.get('cnt', packet_count)}")
+                                            print("   Rincian 30 Parameter:")
+                                            print(format_30_params_display(full_json))
+                                            print("=" * 65 + "\n")
+                                        except Exception as e:
+                                            print(f"   [Reassemble Error]: {e}")
+
+                                        # Reset buffer fragmen
+                                        frag_buffer = {}
+                                        expected_total_parts = 0
+
+                                except Exception as err:
+                                    print(f"   [Fragment Parse Error]: {err}")
+
+                            # 2. Cek apakah paket tunggal 245 Byte (Single Packet 30 Param)
+                            elif raw_bytes.startswith(b"P30:"):
+                                packet_count += 1
+                                raw_str = raw_bytes.decode('utf-8', errors='ignore')
+                                body = raw_str.split('#')[0]  # buang padding '#'
+                                parts = body.split(':')
+                                p_cnt = parts[1] if len(parts) > 1 else '?'
+                                values = parts[2].split(',') if len(parts) > 2 else []
+
+                                print("=" * 65)
+                                print(f"⚡ [{timestamp}] 📥 PAKET TUNGGAL PENUH 245 BYTE (#{packet_count})")
+                                print(f"   Ukuran Paket  : {len(raw_bytes)} Byte (Kapasitas Buffer Maksimal LoRa 256B)")
+                                print(f"   Jumlah Param  : {len(values)} Parameter Sensor")
+                                print(f"   Sinyal Radio  : RSSI = {last_rssi} dBm | SNR = {last_snr} dB")
+                                print(f"   Nilai Sensor  : {values[:8]}... (+{len(values)-8} lagi)")
+                                print("=" * 65 + "\n")
+
+                            # 3. Payload standar lainnya (JSON kecil / teks biasa)
+                            else:
+                                packet_count += 1
+                                try:
+                                    text = raw_bytes.decode('utf-8')
+                                    print(f"[{timestamp}] 📥 [Paket #{packet_count}] ({len(raw_bytes)}B): {text[:80]} | RSSI:{last_rssi}dBm")
+                                except Exception:
+                                    print(f"[{timestamp}] 📥 [Paket #{packet_count}] ({len(raw_bytes)}B Hex): {parsed['hex'][:60]} | RSSI:{last_rssi}dBm")
+
+            time.sleep(0.002)
 
     except KeyboardInterrupt:
-        print("\n[RECEIVER] Dihentikan oleh pengguna (Ctrl+C).")
+        print(f"\n[RECEIVER] Berhenti. Total {packet_count} paket/kumpulan data diterima.")
     finally:
         if ser and ser.is_open:
             print("Menghentikan mode receive (AT+PRECV=0)...")
-            send_at_command(ser, "AT+PRECV=0", timeout=0.5)
+            send_at_command(ser, "AT+PRECV=0", timeout=0.3)
             ser.close()
-            print("Serial port berhasil ditutup dengan aman.")
+            print("Serial port ditutup.")
 
 
 if __name__ == '__main__':
