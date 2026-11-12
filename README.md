@@ -1,82 +1,90 @@
-# Panduan Komunikasi LoRa P2P: 2x Raspberry Pi 5 & RAK3272S
+# Panduan Komunikasi LoRa P2P Ultra-Fast (Sub-Detik)
+## 2x Raspberry Pi 5 & RAKwireless RAK3272S
 
-Proyek ini menyediakan implementasi komunikasi nirkabel **LoRa Point-to-Point (P2P)** antar dua perangkat **Raspberry Pi 5** dan modul **RAKwireless RAK3272S** (berbasis chip STM32WLE5CC dengan firmware RUI3).
-
-### Arsitektur Node:
-1. **Node Transmitter (TX):**
-   * **Raspberry Pi 5 :** Menggunakan **UART3** (Pin 24 TX & Pin 21 RX) $\rightarrow$ `/dev/ttyAMA3`
-   * **RAK3272S       :** Menggunakan **UART1** (Header J5: Pin 5 RX1 & Pin 6 TX1)
-   * *(Sesuai desain printed board PCB)*
-2. **Node Receiver (RX):**
-   * **Raspberry Pi 5 :** Menggunakan **UART0** (Pin 8 TX & Pin 10 RX) $\rightarrow$ `/dev/ttyAMA0` *(atau port serial lain)*
-   * **RAK3272S       :** Menggunakan **UART2** (Header J4: Pin 7 TX2 & Pin 8 RX2)
-   * *(Menggunakan port default pabrik RUI3)*
+Proyek ini menyediakan implementasi komunikasi nirkabel **LoRa Point-to-Point (P2P) Kecepatan Tinggi (Sub-Detik)** antar dua perangkat **Raspberry Pi 5** menggunakan modul **RAK3272S** (chip STM32WLE5CC RUI3).
 
 ---
 
-## 📡 Skema Pengkabelan (Wiring Diagram)
-
-### 1. Node Transmitter (TX) — Menggunakan UART1 (Header J5)
-
-| Pin Raspberry Pi 5 (40-Pin Header) | Fungsi Pin Pi 5 | Pin Modul RAK3272S (Header J5) | Fungsi RAK3272S | Keterangan |
-| :--- | :--- | :--- | :--- | :--- |
-| **Pin 1** (atau Pin 17) | **3.3V Power** | **Header J5 Pin 9** | **3V3** | Tegangan 3.3V (**JANGAN hubungkan ke 5V!**) |
-| **Pin 6** (atau Pin 9, 14, 20) | **GND** | **Header J5 Pin 7** | **GND** | Ground bersama |
-| **Pin 24** (GPIO 8) | **UART3 TXD** | **Header J5 Pin 5** | **RX1** (UART1 RX) | TX Pi 5 $\rightarrow$ RX1 RAK |
-| **Pin 21** (GPIO 9) | **UART3 RXD** | **Header J5 Pin 6** | **TX1** (UART1 TX) | RX Pi 5 $\leftarrow$ TX1 RAK |
-
-### 2. Node Receiver (RX) — Menggunakan UART2 (Header J4)
-
-| Pin Raspberry Pi 5 (40-Pin Header) | Fungsi Pin Pi 5 | Pin Modul RAK3272S (Header J4) | Fungsi RAK3272S | Keterangan |
-| :--- | :--- | :--- | :--- | :--- |
-| **Pin 1** (atau Pin 17) | **3.3V Power** | **Header J5 Pin 9** | **3V3** | Tegangan 3.3V |
-| **Pin 6** (atau Pin 9, 14, 20) | **GND** | **Header J4 Pin 4** | **GND** | Ground bersama |
-| **Pin 8** (GPIO 14) | **UART0 TXD** | **Header J4 Pin 8** | **RX2** (UART2 RX) | TX Pi 5 $\rightarrow$ RX2 RAK |
-| **Pin 10** (GPIO 15) | **UART0 RXD** | **Header J4 Pin 7** | **TX2** (UART2 TX) | RX Pi 5 $\leftarrow$ TX2 RAK |
-
-*(Catatan: Jika pada Pi Receiver Anda juga menggunakan UART3, cukup jalankan `python3 rx.py /dev/ttyAMA3`).*
-
-> ⚠️ **PERINGATAN ANTENA:**
-> Pasang **Antena LoRa** pada konektor IPEX/SMA RAK3272S **SEBELUM** menyalakan modul atau memprogram transmisi untuk mencegah kerusakan amplifier radio internal (PA).
+### ⚡ Optimalisasi Kecepatan Sub-Detik:
+1. **Bandwidth Maksimum (500 kHz):** 4x lebih cepat dari LoRa standar 125 kHz.
+2. **Time-on-Air (ToA) Singkat:** Hanya **~15 - 25 milidetik** per paket di udara!
+3. **Throughput Tinggi:** Mampu mengirim & menerima **5 hingga 20 paket per detik (5 - 20 Hz)**.
+4. **Latency Real-time:** Receiver menampilkan statistik kecepatan (pkt/s), RSSI, dan SNR secara live.
 
 ---
 
-## ⚙️ Parameter Radio LoRa P2P (Sinkron Antara TX & RX)
+### 📡 Arsitektur Node & Pengkabelan
 
-* **Frekuensi:** `923.2 MHz` (Band AS923 Indonesia)
+#### 1. Node Transmitter (TX) — Menggunakan UART1 (Header J5)
+*Sesuai jalur printed board PCB Anda:*
+
+| Dari Raspberry Pi 5 (TX) | Ke Modul RAK3272S (TX) | Keterangan |
+| :--- | :--- | :--- |
+| **Pin 24 (TXD3)** | $\rightarrow$ **Header J5 Pin 5 (RX1)** | Jalur TX Pi $\rightarrow$ RX1 RAK |
+| **Pin 21 (RXD3)** | $\leftarrow$ **Header J5 Pin 6 (TX1)** | Jalur RX Pi $\leftarrow$ TX1 RAK |
+| **Pin 1 (3.3V)** | $\rightarrow$ **Header J5 Pin 9 (3V3)** | Tegangan 3.3V |
+| **Pin 6 (GND)** | $\rightarrow$ **Header J5 Pin 7 (GND)** | Ground bersama |
+
+#### 2. Node Receiver (RX) — Menggunakan UART2 (Header J4)
+*Port default pabrik modul RAK (Header J4):*
+
+| Dari Raspberry Pi (RX) | Ke Modul RAK3272S (RX) | Keterangan |
+| :--- | :--- | :--- |
+| **Pin 8 (GPIO 14 - TXD0)** | $\rightarrow$ **Header J4 Pin 8 (RX2)** | TX Pi $\rightarrow$ RX2 RAK |
+| **Pin 10 (GPIO 15 - RXD0)** | $\leftarrow$ **Header J4 Pin 7 (TX2)** | RX Pi $\leftarrow$ TX2 RAK |
+| **Pin 1 (3.3V)** | $\rightarrow$ **Header J5 Pin 9 (3V3)** | Tegangan 3.3V |
+| **Pin 6 (GND)** | $\rightarrow$ **Header J4 Pin 4 (GND)** | Ground bersama |
+
+*(Catatan: Jika Pi Receiver juga menggunakan port lain seperti `/dev/ttyAMA3` atau `/dev/ttyUSB0`, cukup sebutkan nama port saat menjalankan script).*
+
+---
+
+### ⚙️ Parameter Radio LoRa P2P Ultra-Fast
+
+* **Frekuensi:** `923.2 MHz` (Band AS923)
 * **Spreading Factor:** `SF7`
-* **Bandwidth:** `125 kHz` (Kode: `0`)
-* **Coding Rate:** `4/5` (Kode: `0`)
-* **Preamble Length:** `8`
+* **Bandwidth:** `500 kHz` (`P2P_BW = 2`, Mode Tercepat!)
+* **Coding Rate:** `4/5` (`P2P_CR = 0`)
+* **Preamble:** `8`
 * **Tx Power:** `20 dBm`
 
 ---
 
-## 🚀 Cara Menjalankan
+### 🚀 Cara Menjalankan
 
-### Langkah 1: Pengecekan AT pada Masing-Masing Node
+#### 1. Tarik Pembaruan di Kedua Raspberry Pi:
+```bash
+cd ~/idrisLoRa
+git pull origin main
+```
 
-- **Pada Pi Transmitter (TX):**
-  ```bash
-  python3 cek.py /dev/ttyAMA3
-  ```
-- **Pada Pi Receiver (RX):**
-  ```bash
-  python3 cek.py /dev/ttyAMA0
-  ```
-
-### Langkah 2: Jalankan Receiver Terlebih Dahulu
-Pada Raspberry Pi **Receiver**:
+#### 2. Jalankan Receiver Terlebih Dahulu:
+Di Raspberry Pi **Receiver**:
 ```bash
 python3 rx.py
 ```
-*(Atau tentukan port jika bukan ttyAMA0, misal: `python3 rx.py /dev/ttyAMA0`)*
+*(Atau jika port Receiver berbeda: `python3 rx.py /dev/ttyAMA0` atau `python3 rx.py /dev/ttyAMA3`)*
 
-### Langkah 3: Jalankan Transmitter
-Pada Raspberry Pi **Transmitter**:
-```bash
-python3 tx.py
-```
-*(Atau tentukan port jika berbeda, misal: `python3 tx.py /dev/ttyAMA3`)*
+#### 3. Jalankan Transmitter dengan Pilihan Kecepatan:
+Di Raspberry Pi **Transmitter**:
 
-Transmitter akan memancarkan telemetri JSON secara berkala setiap 5 detik, dan Receiver akan menangkapnya secara realtime beserta indikator kualitas sinyal **RSSI** dan **SNR**!
+- **Pilihan A: Kecepatan 5 Paket/detik (Interval 0.2 detik - Rekomendasi):**
+  ```bash
+  python3 tx.py /dev/ttyAMA3 0.2
+  ```
+
+- **Pilihan B: Kecepatan 10 Paket/detik (Interval 0.1 detik / 100 ms):**
+  ```bash
+  python3 tx.py /dev/ttyAMA3 0.1
+  ```
+
+- **Pilihan C: Kecepatan 20 Paket/detik (Interval 50 ms):**
+  ```bash
+  python3 tx.py /dev/ttyAMA3 0.05
+  ```
+
+- **Pilihan D: Mode Streaming Maksimum (Zero Delay / 0 jeda):**
+  ```bash
+  python3 tx.py /dev/ttyAMA3 0
+  ```
+  *(Modul akan langsung menembakkan paket berikutnya begitu paket sebelumnya selesai terkirim!)*
