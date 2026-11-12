@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
 """
 LoRa P2P Receiver Node (ROS2) - RAK3272S
-Pasangan persis dari lora_transmitter_node terbaru.
+Pasangan persis dari lora_transmitter_node terbaru (99 parameter sensor).
 
 Alur:
   1. Radio LoRa P2P menerima event +EVT:RXP2P:<rssi>:<snr>:<hex_data>
-  2. Reassemble fragmen "FRG:index/total:<chunk>"
-  3. Memotong dan memvalidasi CRC16-CCITT (*XXXX di 5 byte terakhir)
-  4. Parse JSON numeric array [val1, val2, ... val35]
-  5. Memetakan 35 angka ke EXPECTED_KEYS:
-       - 23 parameter pertama -> Arduino UNO Q
-       - 12 parameter terakhir -> Cosmic Aurora
-  6. Menampilkan log 1 baris horizontal bersih
+  2. Reassemble fragmen "FRG:index/total:<chunk>" (termasuk single fragment "FRG:1/1:<chunk>")
+  3. Memotong dan memvalidasi CRC16-CCITT (*XXXX di akhir payload)
+  4. Parse JSON numeric array [val1, val2, ... val99]
+  5. Memetakan 99 angka ke EXPECTED_KEYS:
+       - 23 parameter pertama  -> Arduino UNO Q
+       - 12 parameter          -> Cosmic Aurora
+       - 5 parameter           -> Loadcell
+       - 16 parameter          -> Sensor Flex (flex1 - flex16)
+       - 14 parameter          -> Sensor MCP (mcp1 - mcp14)
+       - 14 parameter          -> Sensor FSR (fsr1 - fsr14)
+       - 14 parameter          -> Sensor Piezo (piezo1 - piezo14)
+       - 1 parameter           -> Sensor Thermal
+  6. Menampilkan log 1 baris horizontal bersih tanpa jeda baris/emoji
   7. Mempublikasikan ke topic ROS2:
        - /telemetri/arduino       (JSON 23 parameter Arduino)
        - /telemetri/aurora        (JSON 12 parameter Aurora)
-       - /telemetri/received_raw  (JSON seluruh 35 parameter)
+       - /telemetri/loadcell      (JSON 5 parameter Loadcell)
+       - /telemetri/flex          (JSON 16 parameter Flex)
+       - /telemetri/mcp           (JSON 14 parameter MCP)
+       - /telemetri/fsr           (JSON 14 parameter FSR)
+       - /telemetri/piezo         (JSON 14 parameter Piezo)
+       - /telemetri/thermal       (JSON parameter Thermal)
+       - /telemetri/received_raw  (JSON seluruh 99 parameter)
        - /telemetri/radio_status  (JSON status RSSI & SNR)
 """
 
 import json
+import os
 import time
 
 import serial
@@ -45,48 +58,134 @@ TX_POWER = 20
 
 
 # ============================================================
-# URUTAN 35 PARAMETER (PERSIS SESUAI TRANSMITTER)
+# URUTAN 99 PARAMETER (PERSIS SESUAI TRANSMITTER)
+# JANGAN MENGUBAH URUTAN INI TANPA MENGUBAH TRANSMITTER
 # ============================================================
 
 EXPECTED_KEYS = [
-    # Arduino UNO Q (23 parameter)
+    # Arduino UNO Q (23)
     "lidar_raw",
     "mq_nh3",
     "mq_co",
     "mq_co2",
     "smoke",
+
     "mpu_acc_x_raw",
     "mpu_acc_y_raw",
     "mpu_acc_z_raw",
+
     "mpu_gyro_x_raw",
     "mpu_gyro_y_raw",
     "mpu_gyro_z_raw",
+
     "mpu_acc_x_kalman",
     "mpu_acc_y_kalman",
     "mpu_acc_z_kalman",
+
     "mpu_gyro_x_kalman",
     "mpu_gyro_y_kalman",
     "mpu_gyro_z_kalman",
+
     "adxl_acc_x_raw",
     "adxl_acc_y_raw",
     "adxl_acc_z_raw",
+
     "adxl_acc_x_kalman",
     "adxl_acc_y_kalman",
     "adxl_acc_z_kalman",
 
-    # Cosmic Aurora (12 parameter)
+    # Cosmic Aurora (12)
     "accelx",
     "accely",
     "accelz",
+
     "gyrox",
     "gyroy",
     "gyroz",
+
     "bme_temp",
     "bme_hum",
     "bme_pres",
     "bme_alt",
+
     "sound_dbLeft",
     "sound_dbRight",
+
+    # Loadcells (5)
+    "loadcell_paka",
+    "loadcell_paki",
+    "loadcell_leher",
+    "loadcell_kaka",
+    "loadcell_kaki",
+
+    # Flex Sensors (16)
+    "flex1",
+    "flex2",
+    "flex3",
+    "flex4",
+    "flex5",
+    "flex6",
+    "flex7",
+    "flex8",
+    "flex9",
+    "flex10",
+    "flex11",
+    "flex12",
+    "flex13",
+    "flex14",
+    "flex15",
+    "flex16",
+
+    # MCP Sensors (14)
+    "mcp1",
+    "mcp2",
+    "mcp3",
+    "mcp4",
+    "mcp5",
+    "mcp6",
+    "mcp7",
+    "mcp8",
+    "mcp9",
+    "mcp10",
+    "mcp11",
+    "mcp12",
+    "mcp13",
+    "mcp14",
+
+    # FSR Sensors (14)
+    "fsr1",
+    "fsr2",
+    "fsr3",
+    "fsr4",
+    "fsr5",
+    "fsr6",
+    "fsr7",
+    "fsr8",
+    "fsr9",
+    "fsr10",
+    "fsr11",
+    "fsr12",
+    "fsr13",
+    "fsr14",
+
+    # Piezo Sensors (14)
+    "piezo1",
+    "piezo2",
+    "piezo3",
+    "piezo4",
+    "piezo5",
+    "piezo6",
+    "piezo7",
+    "piezo8",
+    "piezo9",
+    "piezo10",
+    "piezo11",
+    "piezo12",
+    "piezo13",
+    "piezo14",
+
+    # Thermal Sensor (1)
+    "thermal",
 ]
 
 
@@ -96,21 +195,18 @@ EXPECTED_KEYS = [
 
 def crc16_ccitt(data: bytes) -> int:
     crc = 0xFFFF
-
     for byte in data:
         crc ^= byte << 8
-
         for _ in range(8):
             if crc & 0x8000:
                 crc = ((crc << 1) ^ 0x1021) & 0xFFFF
             else:
                 crc = (crc << 1) & 0xFFFF
-
     return crc
 
 
 # ============================================================
-# FORMAT LOG HORIZONTAL 1 BARIS
+# FORMAT LOG HORIZONTAL 1 BARIS BERSIH (99 PARAMETER)
 # ============================================================
 
 def format_horizontal(d: dict) -> str:
@@ -119,16 +215,19 @@ def format_horizontal(d: dict) -> str:
         f"Lidar:{g('lidar_raw')}",
         f"MQ(NH3:{g('mq_nh3')},CO:{g('mq_co')},CO2:{g('mq_co2')})",
         f"Smoke:{g('smoke')}",
-        f"MPU_Raw[A:({g('mpu_acc_x_raw')},{g('mpu_acc_y_raw')},{g('mpu_acc_z_raw')}) "
-        f"G:({g('mpu_gyro_x_raw')},{g('mpu_gyro_y_raw')},{g('mpu_gyro_z_raw')})]",
-        f"MPU_Klm[A:({g('mpu_acc_x_kalman')},{g('mpu_acc_y_kalman')},{g('mpu_acc_z_kalman')}) "
-        f"G:({g('mpu_gyro_x_kalman')},{g('mpu_gyro_y_kalman')},{g('mpu_gyro_z_kalman')})]",
+        f"MPU_Raw[A:({g('mpu_acc_x_raw')},{g('mpu_acc_y_raw')},{g('mpu_acc_z_raw')}) G:({g('mpu_gyro_x_raw')},{g('mpu_gyro_y_raw')},{g('mpu_gyro_z_raw')})]",
+        f"MPU_Klm[A:({g('mpu_acc_x_kalman')},{g('mpu_acc_y_kalman')},{g('mpu_acc_z_kalman')}) G:({g('mpu_gyro_x_kalman')},{g('mpu_gyro_y_kalman')},{g('mpu_gyro_z_kalman')})]",
         f"ADXL_Raw:({g('adxl_acc_x_raw')},{g('adxl_acc_y_raw')},{g('adxl_acc_z_raw')})",
         f"ADXL_Klm:({g('adxl_acc_x_kalman')},{g('adxl_acc_y_kalman')},{g('adxl_acc_z_kalman')})",
-        f"LSM6DS3[A:({g('accelx')},{g('accely')},{g('accelz')}) "
-        f"G:({g('gyrox')},{g('gyroy')},{g('gyroz')})]",
+        f"LSM6DS3[A:({g('accelx')},{g('accely')},{g('accelz')}) G:({g('gyrox')},{g('gyroy')},{g('gyroz')})]",
         f"BME280({g('bme_temp')}C,{g('bme_hum')}%,{g('bme_pres')}hPa,{g('bme_alt')}m)",
         f"Sound(L:{g('sound_dbLeft')},R:{g('sound_dbRight')}dB)",
+        f"Loadcell({g('loadcell_paka')},{g('loadcell_paki')},{g('loadcell_leher')},{g('loadcell_kaka')},{g('loadcell_kaki')})",
+        f"Flex[{','.join(str(g(f'flex{i}')) for i in range(1, 17))}]",
+        f"MCP[{','.join(str(g(f'mcp{i}')) for i in range(1, 15))}]",
+        f"FSR[{','.join(str(g(f'fsr{i}')) for i in range(1, 15))}]",
+        f"Piezo[{','.join(str(g(f'piezo{i}')) for i in range(1, 15))}]",
+        f"Thermal:{g('thermal')}",
     ]
     return " | ".join(p)
 
@@ -151,7 +250,7 @@ class LoRaReceiverNode(Node):
         self.declare_parameter("cr", CODING_RATE)
         self.declare_parameter("preamble", PREAMBLE)
         self.declare_parameter("tx_power", TX_POWER)
-        self.declare_parameter("frag_timeout", 2.5)
+        self.declare_parameter("frag_timeout", 3.0)
 
         gp = lambda n: self.get_parameter(n).value
         self.port = str(gp("port"))
@@ -177,29 +276,16 @@ class LoRaReceiverNode(Node):
         self.last_snr = "-"
 
         # ---- Publishers ----
-        self.pub_arduino = self.create_publisher(
-            String,
-            "/telemetri/arduino",
-            10
-        )
-
-        self.pub_aurora = self.create_publisher(
-            String,
-            "/telemetri/aurora",
-            10
-        )
-
-        self.pub_raw = self.create_publisher(
-            String,
-            "/telemetri/received_raw",
-            10
-        )
-
-        self.pub_status = self.create_publisher(
-            String,
-            "/telemetri/radio_status",
-            10
-        )
+        self.pub_arduino = self.create_publisher(String, "/telemetri/arduino", 10)
+        self.pub_aurora = self.create_publisher(String, "/telemetri/aurora", 10)
+        self.pub_loadcell = self.create_publisher(String, "/telemetri/loadcell", 10)
+        self.pub_flex = self.create_publisher(String, "/telemetri/flex", 10)
+        self.pub_mcp = self.create_publisher(String, "/telemetri/mcp", 10)
+        self.pub_fsr = self.create_publisher(String, "/telemetri/fsr", 10)
+        self.pub_piezo = self.create_publisher(String, "/telemetri/piezo", 10)
+        self.pub_thermal = self.create_publisher(String, "/telemetri/thermal", 10)
+        self.pub_raw = self.create_publisher(String, "/telemetri/received_raw", 10)
+        self.pub_status = self.create_publisher(String, "/telemetri/radio_status", 10)
 
         # ---- Initialize Serial & Radio ----
         self.initialize_serial()
@@ -209,7 +295,7 @@ class LoRaReceiverNode(Node):
         self.create_timer(0.5, self.check_frag_timeout)
 
         self.get_logger().info(
-            f"LoRa receiver node started on {self.port} @ {self.baud}"
+            f"LoRa receiver node started on {self.port} @ {self.baud} (Expecting 99 parameters)"
         )
 
     # ========================================================
@@ -217,15 +303,28 @@ class LoRaReceiverNode(Node):
     # ========================================================
 
     def initialize_serial(self):
+        candidate_ports = [self.port, "/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0"]
+        chosen_port = None
+
+        for p in candidate_ports:
+            if os.path.exists(p):
+                chosen_port = p
+                break
+
+        if not chosen_port:
+            chosen_port = self.port
+
         try:
             self.serial_port = serial.Serial(
-                port=self.port,
+                port=chosen_port,
                 baudrate=self.baud,
                 timeout=0.1,
-                write_timeout=1
+                write_timeout=1.0,
+                rtscts=False
             )
+            self.port = chosen_port
 
-            time.sleep(1)
+            time.sleep(0.5)
 
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
@@ -238,7 +337,7 @@ class LoRaReceiverNode(Node):
 
         except Exception as error:
             self.get_logger().error(
-                f"RAK connection failed: {error}"
+                f"RAK connection failed on {chosen_port}: {error}"
             )
             self.serial_port = None
 
@@ -291,7 +390,7 @@ class LoRaReceiverNode(Node):
                         )
                         return True
 
-                time.sleep(0.05)
+                time.sleep(0.02)
 
             self.get_logger().warning(
                 f"AT timeout: {command} | {response.strip()}"
@@ -314,32 +413,41 @@ class LoRaReceiverNode(Node):
 
         self.get_logger().info("Configuring RAK LoRa P2P Receiver...")
 
-        commands = [
-            "AT",
-            "AT+NWM=0",
-            "AT+PRECV=0",
-            (
-                f"AT+P2P={self.freq}:"
-                f"{self.sf}:"
-                f"{self.bw}:"
-                f"{self.cr}:"
-                f"{self.preamble}:"
-                f"{self.tx_power}"
-            ),
-            "AT+PRECV=65534",
-        ]
+        # 1. Pastikan komunikasi AT dasar
+        self.send_at("AT", timeout=1.0)
 
-        for command in commands:
-            result = self.send_at(command)
-            if not result:
-                # Coba fallback 65535 jika 65534 tidak terkonfirmasi
-                if "PRECV=65534" in command:
-                    self.send_at("AT+PRECV=65535")
-                else:
-                    self.get_logger().warning(
-                        f"Configuration command not confirmed: {command}"
-                    )
-            time.sleep(0.2)
+        # 2. Pastikan mode kerja P2P (AT+NWM=0)
+        self.serial_port.reset_input_buffer()
+        self.serial_port.write(b"AT+NWM=?\r\n")
+        self.serial_port.flush()
+        time.sleep(0.3)
+        res_nwm = self.serial_port.read_all().decode(errors="ignore")
+
+        if "=0" not in res_nwm:
+            self.get_logger().info("Mengubah RAK ke mode LoRa P2P (AT+NWM=0)...")
+            self.send_at("AT+NWM=0", timeout=2.0)
+            time.sleep(1.5)
+            self.send_at("AT", timeout=1.0)
+
+        # 3. Matikan receive sementara agar setting P2P tidak bentrok
+        self.send_at("AT+PRECV=0", timeout=1.0)
+
+        # 4. Set parameter radio P2P
+        p2p_cmd = (
+            f"AT+P2P={self.freq}:"
+            f"{self.sf}:"
+            f"{self.bw}:"
+            f"{self.cr}:"
+            f"{self.preamble}:"
+            f"{self.tx_power}"
+        )
+        self.send_at(p2p_cmd, timeout=2.0)
+
+        # 5. Aktifkan continuous RX (65534 / fallback 65535)
+        res_recv = self.send_at("AT+PRECV=65534", timeout=2.0)
+        if not res_recv:
+            self.get_logger().info("Fallback AT+PRECV=65535...")
+            self.send_at("AT+PRECV=65535", timeout=2.0)
 
         self.get_logger().info("RAK Receiver configuration sequence completed.")
 
@@ -367,23 +475,8 @@ class LoRaReceiverNode(Node):
                     continue
 
                 # Format event RAK P2P: +EVT:RXP2P:<rssi>:<snr>:<hex_data>
-                if "+EVT:RXP2P" in line:
-                    rssi, snr, hex_str = None, None, None
-
-                    if ":" in line:
-                        parts = line.split(":")
-                        if len(parts) >= 5:
-                            rssi = parts[2].strip()
-                            snr = parts[3].strip()
-                            hex_str = ":".join(parts[4:]).strip()
-
-                    if not hex_str and " " in line:
-                        parts = line.split()
-                        if len(parts) >= 4:
-                            rssi = parts[-3].strip()
-                            snr = parts[-2].strip()
-                            hex_str = parts[-1].strip()
-
+                if "+EVT:RXP2P" in line or "RXP2P" in line:
+                    rssi, snr, hex_str = self.parse_rx_line(line)
                     if hex_str:
                         try:
                             raw_bytes = bytes.fromhex(hex_str)
@@ -391,12 +484,42 @@ class LoRaReceiverNode(Node):
                         except ValueError:
                             self.get_logger().error(f"Gagal konversi hex: {hex_str[:30]}")
 
-            if len(self.rx_buffer) > 8192:
+            if len(self.rx_buffer) > 16384:
                 self.rx_buffer = ""
 
         except (serial.SerialException, OSError) as exc:
             self.get_logger().error(f"Serial read error: {exc}")
             self.try_reconnect()
+
+    def parse_rx_line(self, line: str):
+        """Mengekstrak RSSI, SNR, dan hex string dari event RXP2P secara tangguh."""
+        if "+EVT:RXP2P" not in line and "RXP2P" not in line:
+            return None, None, None
+
+        idx = line.find("RXP2P")
+        after = line[idx + len("RXP2P"):].strip()
+        after = after.lstrip(": ")
+        tokens = [t.strip() for t in after.split(":") if t.strip()]
+
+        if len(tokens) >= 3:
+            rssi = tokens[0]
+            snr = tokens[1]
+            hex_str = ":".join(tokens[2:]).strip()
+            if hex_str.upper() in ["TIMEOUT", "ERROR", "RECEIVE TIMEOUT"]:
+                return None, None, None
+            return rssi, snr, hex_str
+
+        # Fallback pemisahan spasi
+        parts = line.split()
+        if len(parts) >= 3:
+            hex_str = parts[-1].strip()
+            if hex_str.upper() in ["TIMEOUT", "ERROR", "RECEIVE TIMEOUT"]:
+                return None, None, None
+            rssi = parts[-3].strip() if len(parts) >= 4 else "-"
+            snr = parts[-2].strip() if len(parts) >= 4 else "-"
+            return rssi, snr, hex_str
+
+        return None, None, None
 
     # ========================================================
     # REASSEMBLE FRAGMENT & VERIFIKASI CRC
@@ -422,7 +545,7 @@ class LoRaReceiverNode(Node):
 
                 self.frag_buffer[idx] = chunk
 
-                # Cek jika seluruh fragmen lengkap
+                # Cek jika seluruh fragmen lengkap (termasuk kasus total == 1)
                 if len(self.frag_buffer) == self.frag_total:
                     complete_data = b"".join(
                         self.frag_buffer[i] for i in range(1, self.frag_total + 1)
@@ -469,7 +592,7 @@ class LoRaReceiverNode(Node):
         else:
             json_bytes = complete_data
 
-        # 2. Parse JSON numeric array [val1, val2, ... val35]
+        # 2. Parse JSON numeric array [val1, val2, ... val99]
         try:
             values = json.loads(json_bytes.decode("utf-8"))
         except Exception as err:
@@ -480,14 +603,20 @@ class LoRaReceiverNode(Node):
             self.get_logger().warning(f"Format payload bukan list angka: {type(values)}")
             return
 
-        # 3. Petakan angka ke EXPECTED_KEYS (35 parameter)
+        # 3. Petakan angka ke EXPECTED_KEYS (99 parameter)
         sensor_dict = {}
         for key, val in zip(EXPECTED_KEYS, values):
             sensor_dict[key] = val
 
-        # Pisahkan menjadi data Arduino (23 parameter) dan Aurora (12 parameter)
+        # Pisahkan menjadi sub-kelompok parameter
         arduino_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[:23] if k in sensor_dict}
-        aurora_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[23:] if k in sensor_dict}
+        aurora_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[23:35] if k in sensor_dict}
+        loadcell_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[35:40] if k in sensor_dict}
+        flex_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[40:56] if k in sensor_dict}
+        mcp_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[56:70] if k in sensor_dict}
+        fsr_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[70:84] if k in sensor_dict}
+        piezo_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[84:98] if k in sensor_dict}
+        thermal_dict = {"thermal": sensor_dict.get("thermal", 0.0)}
 
         # 4. Tampilkan 1 baris horizontal bersih di terminal
         line = format_horizontal(sensor_dict)
@@ -498,22 +627,52 @@ class LoRaReceiverNode(Node):
         )
 
         # 5. Publikasikan ke Topic ROS2
-        # A. Arduino UNO Q
+        # A. Arduino UNO Q (23 params)
         msg_ard = String()
         msg_ard.data = json.dumps(arduino_dict)
         self.pub_arduino.publish(msg_ard)
 
-        # B. Cosmic Aurora
+        # B. Cosmic Aurora (12 params)
         msg_aur = String()
         msg_aur.data = json.dumps(aurora_dict)
         self.pub_aurora.publish(msg_aur)
 
-        # C. Raw Whole 35 Parameters
+        # C. Loadcells (5 params)
+        msg_lc = String()
+        msg_lc.data = json.dumps(loadcell_dict)
+        self.pub_loadcell.publish(msg_lc)
+
+        # D. Flex Sensors (16 params)
+        msg_flx = String()
+        msg_flx.data = json.dumps(flex_dict)
+        self.pub_flex.publish(msg_flx)
+
+        # E. MCP Sensors (14 params)
+        msg_mcp = String()
+        msg_mcp.data = json.dumps(mcp_dict)
+        self.pub_mcp.publish(msg_mcp)
+
+        # F. FSR Sensors (14 params)
+        msg_fsr = String()
+        msg_fsr.data = json.dumps(fsr_dict)
+        self.pub_fsr.publish(msg_fsr)
+
+        # G. Piezo Sensors (14 params)
+        msg_pzo = String()
+        msg_pzo.data = json.dumps(piezo_dict)
+        self.pub_piezo.publish(msg_pzo)
+
+        # H. Thermal Sensor (1 param)
+        msg_thm = String()
+        msg_thm.data = json.dumps(thermal_dict)
+        self.pub_thermal.publish(msg_thm)
+
+        # I. Raw Whole 99 Parameters
         msg_raw = String()
         msg_raw.data = json.dumps(sensor_dict)
         self.pub_raw.publish(msg_raw)
 
-        # D. Radio Status
+        # J. Radio Status
         msg_stat = String()
         msg_stat.data = json.dumps({
             "packet_count": self.packet_count,
