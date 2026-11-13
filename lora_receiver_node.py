@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """
-LoRa P2P Receiver Node (ROS2) - RAK3272S
-Pasangan persis dari lora_transmitter_node terbaru (99 parameter sensor).
+LoRa P2P Receiver Node (ROS2) - RAK3272S (99 Parameter Sensor Terkompresi)
+Pasangan persis dari lora_transmitter_node.py.
 
 Alur:
   1. Radio LoRa P2P menerima event +EVT:RXP2P:<rssi>:<snr>:<hex_data>
-  2. Reassemble fragmen "FRG:index/total:<chunk>" (termasuk single fragment "FRG:1/1:<chunk>")
-  3. Memotong dan memvalidasi CRC16-CCITT (*XXXX di akhir payload)
-  4. Parse JSON numeric array [val1, val2, ... val99]
-  5. Memetakan 99 angka ke EXPECTED_KEYS:
-       - 23 parameter pertama  -> Arduino UNO Q
-       - 12 parameter          -> Cosmic Aurora
-       - 5 parameter           -> Loadcell
-       - 16 parameter          -> Sensor Flex (flex1 - flex16)
-       - 14 parameter          -> Sensor MCP (mcp1 - mcp14)
-       - 14 parameter          -> Sensor FSR (fsr1 - fsr14)
-       - 14 parameter          -> Sensor Piezo (piezo1 - piezo14)
-       - 1 parameter           -> Sensor Thermal
-  6. Menampilkan log 1 baris horizontal bersih tanpa jeda baris/emoji
-  7. Mempublikasikan ke topic ROS2:
+  2. Konversi hex ke bytes:
+       - Paket Terkompresi Biner ("P99:", tepat 206 Byte):
+           * Verifikasi header b"P99:" dan panjang 206 Byte
+           * Verifikasi CRC16-CCITT (2 byte terakhir)
+           * Unpack counter + 99 nilai float16 (<99e)
+       - Fallback paket JSON / "FRG:" (jika ada format lama)
+  3. Memetakan 99 angka ke EXPECTED_KEYS:
+       - 23 parameter  -> Arduino UNO Q
+       - 12 parameter  -> Cosmic Aurora
+       - 5 parameter   -> Loadcell
+       - 16 parameter  -> Sensor Flex (flex1 - flex16)
+       - 14 parameter  -> Sensor MCP (mcp1 - mcp14)
+       - 14 parameter  -> Sensor FSR (fsr1 - fsr14)
+       - 14 parameter  -> Sensor Piezo (piezo1 - piezo14)
+       - 1 parameter   -> Sensor Thermal
+  4. Menampilkan log 1 baris horizontal bersih tanpa jeda baris dan tanpa emoji.
+  5. Mempublikasikan ke topic ROS2:
        - /telemetri/arduino       (JSON 23 parameter Arduino)
        - /telemetri/aurora        (JSON 12 parameter Aurora)
        - /telemetri/loadcell      (JSON 5 parameter Loadcell)
@@ -32,7 +35,9 @@ Alur:
 """
 
 import json
+import math
 import os
+import struct
 import time
 
 import serial
@@ -188,6 +193,9 @@ EXPECTED_KEYS = [
     "thermal",
 ]
 
+NUM_PARAMS = len(EXPECTED_KEYS)
+COMPRESSED_PACKET_SIZE = 4 + 2 + (NUM_PARAMS * 2) + 2  # 206 Bytes
+
 
 # ============================================================
 # CRC16-CCITT (PERSIS TRANSMITTER)
@@ -295,7 +303,8 @@ class LoRaReceiverNode(Node):
         self.create_timer(0.5, self.check_frag_timeout)
 
         self.get_logger().info(
-            f"LoRa receiver node started on {self.port} @ {self.baud} (Expecting 99 parameters)"
+            f"LoRa receiver node started on {self.port} @ {self.baud} "
+            f"(Expecting compressed P99 {COMPRESSED_PACKET_SIZE}B / 99 parameters)"
         )
 
     # ========================================================
@@ -323,7 +332,6 @@ class LoRaReceiverNode(Node):
                 rtscts=False
             )
             self.port = chosen_port
-
             time.sleep(0.5)
 
             self.serial_port.reset_input_buffer()
@@ -332,7 +340,6 @@ class LoRaReceiverNode(Node):
             self.get_logger().info(
                 f"RAK connected: {self.port}"
             )
-
             self.configure_rak()
 
         except Exception as error:
@@ -413,10 +420,8 @@ class LoRaReceiverNode(Node):
 
         self.get_logger().info("Configuring RAK LoRa P2P Receiver...")
 
-        # 1. Pastikan komunikasi AT dasar
         self.send_at("AT", timeout=1.0)
 
-        # 2. Pastikan mode kerja P2P (AT+NWM=0)
         self.serial_port.reset_input_buffer()
         self.serial_port.write(b"AT+NWM=?\r\n")
         self.serial_port.flush()
@@ -426,13 +431,11 @@ class LoRaReceiverNode(Node):
         if "=0" not in res_nwm:
             self.get_logger().info("Mengubah RAK ke mode LoRa P2P (AT+NWM=0)...")
             self.send_at("AT+NWM=0", timeout=2.0)
-            time.sleep(1.5)
+            time.sleep(2.0)
             self.send_at("AT", timeout=1.0)
 
-        # 3. Matikan receive sementara agar setting P2P tidak bentrok
         self.send_at("AT+PRECV=0", timeout=1.0)
 
-        # 4. Set parameter radio P2P
         p2p_cmd = (
             f"AT+P2P={self.freq}:"
             f"{self.sf}:"
@@ -441,9 +444,19 @@ class LoRaReceiverNode(Node):
             f"{self.preamble}:"
             f"{self.tx_power}"
         )
-        self.send_at(p2p_cmd, timeout=2.0)
+        ok_p2p = self.send_at(p2p_cmd, timeout=2.0)
 
-        # 5. Aktifkan continuous RX (65534 / fallback 65535)
+        if not ok_p2p and self.bw == 2:
+            p2p_fallback = (
+                f"AT+P2P={self.freq}:"
+                f"{self.sf}:"
+                f"500:"
+                f"{self.cr}:"
+                f"{self.preamble}:"
+                f"{self.tx_power}"
+            )
+            self.send_at(p2p_fallback, timeout=2.0)
+
         res_recv = self.send_at("AT+PRECV=65534", timeout=2.0)
         if not res_recv:
             self.get_logger().info("Fallback AT+PRECV=65535...")
@@ -474,13 +487,12 @@ class LoRaReceiverNode(Node):
                 if not line:
                     continue
 
-                # Format event RAK P2P: +EVT:RXP2P:<rssi>:<snr>:<hex_data>
                 if "+EVT:RXP2P" in line or "RXP2P" in line:
                     rssi, snr, hex_str = self.parse_rx_line(line)
                     if hex_str:
                         try:
                             raw_bytes = bytes.fromhex(hex_str)
-                            self.handle_lora_fragment(raw_bytes, rssi, snr)
+                            self.handle_received_bytes(raw_bytes, rssi, snr)
                         except ValueError:
                             self.get_logger().error(f"Gagal konversi hex: {hex_str[:30]}")
 
@@ -509,7 +521,6 @@ class LoRaReceiverNode(Node):
                 return None, None, None
             return rssi, snr, hex_str
 
-        # Fallback pemisahan spasi
         parts = line.split()
         if len(parts) >= 3:
             hex_str = parts[-1].strip()
@@ -522,22 +533,26 @@ class LoRaReceiverNode(Node):
         return None, None, None
 
     # ========================================================
-    # REASSEMBLE FRAGMENT & VERIFIKASI CRC
+    # ROUTE PAKET MASUK (KOMPRESI P99 ATAU FALLBACK FRG/JSON)
     # ========================================================
 
-    def handle_lora_fragment(self, raw_bytes: bytes, rssi: str, snr: str):
-        now = time.monotonic()
+    def handle_received_bytes(self, raw_bytes: bytes, rssi: str, snr: str):
         self.last_rssi = rssi or "-"
         self.last_snr = snr or "-"
 
-        # Cek apakah paket berformat fragmen "FRG:index/total:<chunk>"
+        # 1. Jalur Utama: Paket Kompresi Biner "P99:" (206 Byte)
+        if raw_bytes.startswith(b"P99:"):
+            self.process_compressed_p99(raw_bytes)
+            return
+
+        # 2. Fallback: Paket Fragmen "FRG:i/n:<chunk>"
         if raw_bytes.startswith(b"FRG:"):
+            now = time.monotonic()
             try:
                 meta, chunk = raw_bytes[4:].split(b":", 1)
                 idx_str, tot_str = meta.decode("ascii").split("/")
                 idx, total = int(idx_str), int(tot_str)
 
-                # Jika paket baru (fragmen 1) atau jumlah total berbeda, reset buffer
                 if idx == 1 or total != self.frag_total:
                     self.frag_buffer.clear()
                     self.frag_total = total
@@ -545,7 +560,6 @@ class LoRaReceiverNode(Node):
 
                 self.frag_buffer[idx] = chunk
 
-                # Cek jika seluruh fragmen lengkap (termasuk kasus total == 1)
                 if len(self.frag_buffer) == self.frag_total:
                     complete_data = b"".join(
                         self.frag_buffer[i] for i in range(1, self.frag_total + 1)
@@ -556,43 +570,74 @@ class LoRaReceiverNode(Node):
                     self.frag_buffer.clear()
                     self.frag_total = 0
 
-                    self.process_packet_payload(complete_data, total_frags, elapsed_ms)
+                    self.process_json_payload(complete_data, total_frags, elapsed_ms)
 
             except Exception as err:
                 self.get_logger().error(f"Gagal memproses fragmen: {err}")
+            return
 
-        # Jika paket datang utuh tanpa awalan FRG:
-        else:
-            self.process_packet_payload(raw_bytes, total_frags=1, elapsed_ms=0.0)
+        # 3. Fallback: Raw JSON tanpa awalan
+        self.process_json_payload(raw_bytes, total_frags=1, elapsed_ms=0.0)
 
     # ========================================================
-    # PROSES PAYLOAD LENGKAP
+    # DECODE PAKET KOMPRESI BINER P99 (206 BYTE)
     # ========================================================
 
-    def process_packet_payload(self, complete_data: bytes, total_frags: int, elapsed_ms: float):
+    def process_compressed_p99(self, raw_bytes: bytes):
         self.packet_count += 1
 
-        # 1. Verifikasi dan buang 5 byte terakhir (*XXXX) CRC16
+        if len(raw_bytes) != COMPRESSED_PACKET_SIZE:
+            self.get_logger().warning(
+                f"[RX #{self.packet_count}] Panjang paket P99 tidak sesuai: "
+                f"{len(raw_bytes)}B (seharusnya {COMPRESSED_PACKET_SIZE}B). Paket dibuang."
+            )
+            return
+
+        body = raw_bytes[:-2]
+        expected_crc = struct.unpack("<H", raw_bytes[-2:])[0]
+        actual_crc = crc16_ccitt(body)
+
+        if actual_crc != expected_crc:
+            self.get_logger().warning(
+                f"[RX #{self.packet_count}] CRC MISMATCH! "
+                f"(Dihitung: {actual_crc:04X}, Diterima: {expected_crc:04X}). Paket dibuang."
+            )
+            return
+
+        tx_counter = struct.unpack("<H", raw_bytes[4:6])[0]
+        raw_values = struct.unpack(f"<{NUM_PARAMS}e", raw_bytes[6:COMPRESSED_PACKET_SIZE - 2])
+
+        sensor_dict = {}
+        for key, val in zip(EXPECTED_KEYS, raw_values):
+            fval = float(val)
+            if not math.isfinite(fval):
+                fval = 0.0
+            sensor_dict[key] = round(fval, 3)
+
+        self.publish_and_log(sensor_dict, len(raw_bytes), 1, 0.0, tx_counter=tx_counter)
+
+    # ========================================================
+    # DECODE PAKET JSON FALLBACK
+    # ========================================================
+
+    def process_json_payload(self, complete_data: bytes, total_frags: int, elapsed_ms: float):
+        self.packet_count += 1
+
         if b"*" in complete_data:
             json_bytes, crc_bytes = complete_data.rsplit(b"*", 1)
             try:
                 expected_crc = int(crc_bytes.decode("ascii"), 16)
                 actual_crc = crc16_ccitt(json_bytes)
-
                 if actual_crc != expected_crc:
                     self.get_logger().warning(
-                        f"[RX #{self.packet_count}] CRC MISMATCH! "
-                        f"(Dihitung: {actual_crc:04X}, Diterima: {expected_crc:04X}). Paket dibuang."
+                        f"[RX #{self.packet_count}] CRC MISMATCH JSON!"
                     )
                     return
-
-            except Exception as e:
-                self.get_logger().warning(f"Format CRC tidak valid ({e}), memproses JSON mentah.")
+            except Exception:
                 json_bytes = complete_data
         else:
             json_bytes = complete_data
 
-        # 2. Parse JSON numeric array [val1, val2, ... val99]
         try:
             values = json.loads(json_bytes.decode("utf-8"))
         except Exception as err:
@@ -603,12 +648,15 @@ class LoRaReceiverNode(Node):
             self.get_logger().warning(f"Format payload bukan list angka: {type(values)}")
             return
 
-        # 3. Petakan angka ke EXPECTED_KEYS (99 parameter)
-        sensor_dict = {}
-        for key, val in zip(EXPECTED_KEYS, values):
-            sensor_dict[key] = val
+        sensor_dict = {key: val for key, val in zip(EXPECTED_KEYS, values)}
+        self.publish_and_log(sensor_dict, len(complete_data), total_frags, elapsed_ms)
 
-        # Pisahkan menjadi sub-kelompok parameter
+    # ========================================================
+    # LOG 1 BARIS HORIZONTAL & PUBLISH ROS2 TOPICS
+    # ========================================================
+
+    def publish_and_log(self, sensor_dict: dict, byte_len: int, total_frags: int,
+                        elapsed_ms: float, tx_counter: int = None):
         arduino_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[:23] if k in sensor_dict}
         aurora_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[23:35] if k in sensor_dict}
         loadcell_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[35:40] if k in sensor_dict}
@@ -618,74 +666,40 @@ class LoRaReceiverNode(Node):
         piezo_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[84:98] if k in sensor_dict}
         thermal_dict = {"thermal": sensor_dict.get("thermal", 0.0)}
 
-        # 4. Tampilkan 1 baris horizontal bersih di terminal
         line = format_horizontal(sensor_dict)
+        cnt_info = f"Cnt:{tx_counter}" if tx_counter is not None else f"{elapsed_ms:.0f}ms"
         self.get_logger().info(
-            f"[RX #{self.packet_count:04d}] [{len(complete_data)}B {total_frags}Frg {elapsed_ms:.0f}ms] "
+            f"[RX #{self.packet_count:04d}] [{byte_len}B {total_frags}Paket {cnt_info}] "
             f"[{self.last_rssi}dBm {self.last_snr}dB] "
-            f"[{len(sensor_dict)}/{len(EXPECTED_KEYS)} param] -> {line}"
+            f"[{len(sensor_dict)}/{NUM_PARAMS} param] -> {line}"
         )
 
-        # 5. Publikasikan ke Topic ROS2
-        # A. Arduino UNO Q (23 params)
-        msg_ard = String()
-        msg_ard.data = json.dumps(arduino_dict)
-        self.pub_arduino.publish(msg_ard)
+        def pub(publisher, payload_obj):
+            m = String()
+            m.data = json.dumps(payload_obj)
+            publisher.publish(m)
 
-        # B. Cosmic Aurora (12 params)
-        msg_aur = String()
-        msg_aur.data = json.dumps(aurora_dict)
-        self.pub_aurora.publish(msg_aur)
-
-        # C. Loadcells (5 params)
-        msg_lc = String()
-        msg_lc.data = json.dumps(loadcell_dict)
-        self.pub_loadcell.publish(msg_lc)
-
-        # D. Flex Sensors (16 params)
-        msg_flx = String()
-        msg_flx.data = json.dumps(flex_dict)
-        self.pub_flex.publish(msg_flx)
-
-        # E. MCP Sensors (14 params)
-        msg_mcp = String()
-        msg_mcp.data = json.dumps(mcp_dict)
-        self.pub_mcp.publish(msg_mcp)
-
-        # F. FSR Sensors (14 params)
-        msg_fsr = String()
-        msg_fsr.data = json.dumps(fsr_dict)
-        self.pub_fsr.publish(msg_fsr)
-
-        # G. Piezo Sensors (14 params)
-        msg_pzo = String()
-        msg_pzo.data = json.dumps(piezo_dict)
-        self.pub_piezo.publish(msg_pzo)
-
-        # H. Thermal Sensor (1 param)
-        msg_thm = String()
-        msg_thm.data = json.dumps(thermal_dict)
-        self.pub_thermal.publish(msg_thm)
-
-        # I. Raw Whole 99 Parameters
-        msg_raw = String()
-        msg_raw.data = json.dumps(sensor_dict)
-        self.pub_raw.publish(msg_raw)
-
-        # J. Radio Status
-        msg_stat = String()
-        msg_stat.data = json.dumps({
+        pub(self.pub_arduino, arduino_dict)
+        pub(self.pub_aurora, aurora_dict)
+        pub(self.pub_loadcell, loadcell_dict)
+        pub(self.pub_flex, flex_dict)
+        pub(self.pub_mcp, mcp_dict)
+        pub(self.pub_fsr, fsr_dict)
+        pub(self.pub_piezo, piezo_dict)
+        pub(self.pub_thermal, thermal_dict)
+        pub(self.pub_raw, sensor_dict)
+        pub(self.pub_status, {
             "packet_count": self.packet_count,
-            "bytes": len(complete_data),
+            "tx_counter": tx_counter,
+            "bytes": byte_len,
             "fragments": total_frags,
             "rssi": self.last_rssi,
             "snr": self.last_snr,
             "elapsed_ms": round(elapsed_ms, 1)
         })
-        self.pub_status.publish(msg_stat)
 
     # ========================================================
-    # TIMEOUT FRAGMEN MENGGANTUNG
+    # TIMEOUT FRAGMEN MENGGANTUNG (FALLBACK MODE)
     # ========================================================
 
     def check_frag_timeout(self):
