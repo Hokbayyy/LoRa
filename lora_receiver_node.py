@@ -1,37 +1,20 @@
 #!/usr/bin/env python3
 """
-LoRa P2P Receiver Node (ROS2) - RAK3272S (99 Parameter Sensor Terkompresi)
+LoRa P2P Multi-Node Receiver Node (ROS2) - RAK3272S (1 File untuk Banyak Transmitter)
 Pasangan persis dari lora_transmitter_node.py.
 
-Alur:
-  1. Radio LoRa P2P menerima event +EVT:RXP2P:<rssi>:<snr>:<hex_data>
-  2. Konversi hex ke bytes:
-       - Paket Terkompresi Biner ("P99:", tepat 206 Byte):
-           * Verifikasi header b"P99:" dan panjang 206 Byte
-           * Verifikasi CRC16-CCITT (2 byte terakhir)
-           * Unpack counter + 99 nilai float16 (<99e)
-       - Fallback paket JSON / "FRG:" (jika ada format lama)
-  3. Memetakan 99 angka ke EXPECTED_KEYS:
-       - 23 parameter  -> Arduino UNO Q
-       - 12 parameter  -> Cosmic Aurora
-       - 5 parameter   -> Loadcell
-       - 16 parameter  -> Sensor Flex (flex1 - flex16)
-       - 14 parameter  -> Sensor MCP (mcp1 - mcp14)
-       - 14 parameter  -> Sensor FSR (fsr1 - fsr14)
-       - 14 parameter  -> Sensor Piezo (piezo1 - piezo14)
-       - 1 parameter   -> Sensor Thermal
-  4. Menampilkan log 1 baris horizontal bersih tanpa jeda baris dan tanpa emoji.
-  5. Mempublikasikan ke topic ROS2:
-       - /telemetri/arduino       (JSON 23 parameter Arduino)
-       - /telemetri/aurora        (JSON 12 parameter Aurora)
-       - /telemetri/loadcell      (JSON 5 parameter Loadcell)
-       - /telemetri/flex          (JSON 16 parameter Flex)
-       - /telemetri/mcp           (JSON 14 parameter MCP)
-       - /telemetri/fsr           (JSON 14 parameter FSR)
-       - /telemetri/piezo         (JSON 14 parameter Piezo)
-       - /telemetri/thermal       (JSON parameter Thermal)
-       - /telemetri/received_raw  (JSON seluruh 99 parameter)
-       - /telemetri/radio_status  (JSON status RSSI & SNR)
+Fitur Utama:
+  - 1 File Receiver dapat menerima data dari Node 1, Node 2, dst. secara bersamaan.
+  - Otomatis mendeteksi identitas pengirim (node_id) dari paket biner P99 (207 Byte).
+  - Memisahkan topic ROS2 per Node secara otomatis:
+      * /node1/telemetri/{arduino, aurora, loadcell, flex, mcp, fsr, piezo, thermal, received_raw, radio_status}
+      * /node2/telemetri/{arduino, aurora, loadcell, flex, mcp, fsr, piezo, thermal, received_raw, radio_status}
+      * (serta node ID tambahan jika ada Node 3, Node 4, dst.)
+  - Topic gabungan seluruh node:
+      * /telemetri/received_raw  (memuat field "node_id" + 99 parameter)
+      * /telemetri/radio_status  (memuat field "node_id", RSSI, SNR, bytes, counter)
+  - Topic kompatibilitas legacy (/telemetri/arduino, dll.) mengikuti Node 1 secara default.
+  - Output terminal: 1 baris horizontal bersih per paket dengan label [NODE 1] / [NODE 2], tanpa emoji.
 """
 
 import json
@@ -194,7 +177,8 @@ EXPECTED_KEYS = [
 ]
 
 NUM_PARAMS = len(EXPECTED_KEYS)
-COMPRESSED_PACKET_SIZE = 4 + 2 + (NUM_PARAMS * 2) + 2  # 206 Bytes
+PACKET_SIZE_MULTINODE = 4 + 1 + 2 + (NUM_PARAMS * 2) + 2  # 207 Bytes (with node_id)
+PACKET_SIZE_LEGACY = 4 + 2 + (NUM_PARAMS * 2) + 2        # 206 Bytes (legacy single-node)
 
 
 # ============================================================
@@ -241,7 +225,7 @@ def format_horizontal(d: dict) -> str:
 
 
 # ============================================================
-# NODE ROS2 RECEIVER
+# NODE ROS2 MULTI-NODE RECEIVER
 # ============================================================
 
 class LoRaReceiverNode(Node):
@@ -259,6 +243,7 @@ class LoRaReceiverNode(Node):
         self.declare_parameter("preamble", PREAMBLE)
         self.declare_parameter("tx_power", TX_POWER)
         self.declare_parameter("frag_timeout", 3.0)
+        self.declare_parameter("legacy_global_node_id", 1)
 
         gp = lambda n: self.get_parameter(n).value
         self.port = str(gp("port"))
@@ -270,6 +255,7 @@ class LoRaReceiverNode(Node):
         self.preamble = int(gp("preamble"))
         self.tx_power = int(gp("tx_power"))
         self.frag_timeout = float(gp("frag_timeout"))
+        self.legacy_global_node_id = int(gp("legacy_global_node_id"))
 
         # ---- Serial & State ----
         self.serial_port = None
@@ -277,13 +263,14 @@ class LoRaReceiverNode(Node):
         self.last_reconnect_try = 0.0
 
         self.packet_count = 0
+        self.node_packet_counts = {}
         self.frag_buffer = {}
         self.frag_total = 0
         self.frag_start_time = 0.0
         self.last_rssi = "-"
         self.last_snr = "-"
 
-        # ---- Publishers ----
+        # ---- Global / Combined Publishers ----
         self.pub_arduino = self.create_publisher(String, "/telemetri/arduino", 10)
         self.pub_aurora = self.create_publisher(String, "/telemetri/aurora", 10)
         self.pub_loadcell = self.create_publisher(String, "/telemetri/loadcell", 10)
@@ -295,6 +282,11 @@ class LoRaReceiverNode(Node):
         self.pub_raw = self.create_publisher(String, "/telemetri/received_raw", 10)
         self.pub_status = self.create_publisher(String, "/telemetri/radio_status", 10)
 
+        # ---- Per-Node Publishers (Node 1, Node 2, dan dinamis untuk node lain) ----
+        self.node_publishers = {}
+        self.get_or_create_node_publishers(1)
+        self.get_or_create_node_publishers(2)
+
         # ---- Initialize Serial & Radio ----
         self.initialize_serial()
 
@@ -303,9 +295,26 @@ class LoRaReceiverNode(Node):
         self.create_timer(0.5, self.check_frag_timeout)
 
         self.get_logger().info(
-            f"LoRa receiver node started on {self.port} @ {self.baud} "
-            f"(Expecting compressed P99 {COMPRESSED_PACKET_SIZE}B / 99 parameters)"
+            f"LoRa multi-node receiver started on {self.port} @ {self.baud} "
+            f"(Listening for Node 1, Node 2, etc. | 99 params / {PACKET_SIZE_MULTINODE}B)"
         )
+
+    def get_or_create_node_publishers(self, node_id: int) -> dict:
+        if node_id not in self.node_publishers:
+            prefix = f"/node{node_id}/telemetri"
+            self.node_publishers[node_id] = {
+                "arduino": self.create_publisher(String, f"{prefix}/arduino", 10),
+                "aurora": self.create_publisher(String, f"{prefix}/aurora", 10),
+                "loadcell": self.create_publisher(String, f"{prefix}/loadcell", 10),
+                "flex": self.create_publisher(String, f"{prefix}/flex", 10),
+                "mcp": self.create_publisher(String, f"{prefix}/mcp", 10),
+                "fsr": self.create_publisher(String, f"{prefix}/fsr", 10),
+                "piezo": self.create_publisher(String, f"{prefix}/piezo", 10),
+                "thermal": self.create_publisher(String, f"{prefix}/thermal", 10),
+                "received_raw": self.create_publisher(String, f"{prefix}/received_raw", 10),
+                "radio_status": self.create_publisher(String, f"{prefix}/radio_status", 10),
+            }
+        return self.node_publishers[node_id]
 
     # ========================================================
     # SERIAL INITIALIZATION
@@ -540,7 +549,7 @@ class LoRaReceiverNode(Node):
         self.last_rssi = rssi or "-"
         self.last_snr = snr or "-"
 
-        # 1. Jalur Utama: Paket Kompresi Biner "P99:" (206 Byte)
+        # 1. Jalur Utama: Paket Kompresi Biner "P99:" (207B multi-node atau 206B legacy)
         if raw_bytes.startswith(b"P99:"):
             self.process_compressed_p99(raw_bytes)
             return
@@ -580,16 +589,16 @@ class LoRaReceiverNode(Node):
         self.process_json_payload(raw_bytes, total_frags=1, elapsed_ms=0.0)
 
     # ========================================================
-    # DECODE PAKET KOMPRESI BINER P99 (206 BYTE)
+    # DECODE PAKET KOMPRESI BINER P99 (207 BYTE MULTI-NODE)
     # ========================================================
 
     def process_compressed_p99(self, raw_bytes: bytes):
         self.packet_count += 1
 
-        if len(raw_bytes) != COMPRESSED_PACKET_SIZE:
+        if len(raw_bytes) not in (PACKET_SIZE_MULTINODE, PACKET_SIZE_LEGACY):
             self.get_logger().warning(
                 f"[RX #{self.packet_count}] Panjang paket P99 tidak sesuai: "
-                f"{len(raw_bytes)}B (seharusnya {COMPRESSED_PACKET_SIZE}B). Paket dibuang."
+                f"{len(raw_bytes)}B (seharusnya {PACKET_SIZE_MULTINODE}B). Paket dibuang."
             )
             return
 
@@ -604,8 +613,15 @@ class LoRaReceiverNode(Node):
             )
             return
 
-        tx_counter = struct.unpack("<H", raw_bytes[4:6])[0]
-        raw_values = struct.unpack(f"<{NUM_PARAMS}e", raw_bytes[6:COMPRESSED_PACKET_SIZE - 2])
+        if len(raw_bytes) == PACKET_SIZE_MULTINODE:
+            node_id, tx_counter, *raw_values = struct.unpack(
+                f"<BH{NUM_PARAMS}e", raw_bytes[4:PACKET_SIZE_MULTINODE - 2]
+            )
+        else:
+            node_id = 1
+            tx_counter, *raw_values = struct.unpack(
+                f"<H{NUM_PARAMS}e", raw_bytes[4:PACKET_SIZE_LEGACY - 2]
+            )
 
         sensor_dict = {}
         for key, val in zip(EXPECTED_KEYS, raw_values):
@@ -614,7 +630,9 @@ class LoRaReceiverNode(Node):
                 fval = 0.0
             sensor_dict[key] = round(fval, 3)
 
-        self.publish_and_log(sensor_dict, len(raw_bytes), 1, 0.0, tx_counter=tx_counter)
+        self.publish_and_log(
+            sensor_dict, len(raw_bytes), 1, 0.0, node_id=node_id, tx_counter=tx_counter
+        )
 
     # ========================================================
     # DECODE PAKET JSON FALLBACK
@@ -649,14 +667,17 @@ class LoRaReceiverNode(Node):
             return
 
         sensor_dict = {key: val for key, val in zip(EXPECTED_KEYS, values)}
-        self.publish_and_log(sensor_dict, len(complete_data), total_frags, elapsed_ms)
+        self.publish_and_log(sensor_dict, len(complete_data), total_frags, elapsed_ms, node_id=1)
 
     # ========================================================
-    # LOG 1 BARIS HORIZONTAL & PUBLISH ROS2 TOPICS
+    # LOG 1 BARIS HORIZONTAL & PUBLISH ROS2 TOPICS PER NODE
     # ========================================================
 
     def publish_and_log(self, sensor_dict: dict, byte_len: int, total_frags: int,
-                        elapsed_ms: float, tx_counter: int = None):
+                        elapsed_ms: float, node_id: int = 1, tx_counter: int = None):
+        self.node_packet_counts[node_id] = self.node_packet_counts.get(node_id, 0) + 1
+        node_pkt_cnt = self.node_packet_counts[node_id]
+
         arduino_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[:23] if k in sensor_dict}
         aurora_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[23:35] if k in sensor_dict}
         loadcell_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[35:40] if k in sensor_dict}
@@ -666,11 +687,26 @@ class LoRaReceiverNode(Node):
         piezo_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[84:98] if k in sensor_dict}
         thermal_dict = {"thermal": sensor_dict.get("thermal", 0.0)}
 
+        raw_with_node = {"node_id": node_id}
+        raw_with_node.update(sensor_dict)
+
+        status_obj = {
+            "node_id": node_id,
+            "packet_count": self.packet_count,
+            "node_packet_count": node_pkt_cnt,
+            "tx_counter": tx_counter,
+            "bytes": byte_len,
+            "fragments": total_frags,
+            "rssi": self.last_rssi,
+            "snr": self.last_snr,
+            "elapsed_ms": round(elapsed_ms, 1)
+        }
+
         line = format_horizontal(sensor_dict)
         cnt_info = f"Cnt:{tx_counter}" if tx_counter is not None else f"{elapsed_ms:.0f}ms"
         self.get_logger().info(
-            f"[RX #{self.packet_count:04d}] [{byte_len}B {total_frags}Paket {cnt_info}] "
-            f"[{self.last_rssi}dBm {self.last_snr}dB] "
+            f"[RX #{self.packet_count:04d}] [NODE {node_id} #{node_pkt_cnt:04d}] "
+            f"[{byte_len}B 1Paket {cnt_info}] [{self.last_rssi}dBm {self.last_snr}dB] "
             f"[{len(sensor_dict)}/{NUM_PARAMS} param] -> {line}"
         )
 
@@ -679,24 +715,33 @@ class LoRaReceiverNode(Node):
             m.data = json.dumps(payload_obj)
             publisher.publish(m)
 
-        pub(self.pub_arduino, arduino_dict)
-        pub(self.pub_aurora, aurora_dict)
-        pub(self.pub_loadcell, loadcell_dict)
-        pub(self.pub_flex, flex_dict)
-        pub(self.pub_mcp, mcp_dict)
-        pub(self.pub_fsr, fsr_dict)
-        pub(self.pub_piezo, piezo_dict)
-        pub(self.pub_thermal, thermal_dict)
-        pub(self.pub_raw, sensor_dict)
-        pub(self.pub_status, {
-            "packet_count": self.packet_count,
-            "tx_counter": tx_counter,
-            "bytes": byte_len,
-            "fragments": total_frags,
-            "rssi": self.last_rssi,
-            "snr": self.last_snr,
-            "elapsed_ms": round(elapsed_ms, 1)
-        })
+        # 1. Publikasikan ke topic spesifik node (/node1/telemetri/..., /node2/telemetri/...)
+        node_pubs = self.get_or_create_node_publishers(node_id)
+        pub(node_pubs["arduino"], arduino_dict)
+        pub(node_pubs["aurora"], aurora_dict)
+        pub(node_pubs["loadcell"], loadcell_dict)
+        pub(node_pubs["flex"], flex_dict)
+        pub(node_pubs["mcp"], mcp_dict)
+        pub(node_pubs["fsr"], fsr_dict)
+        pub(node_pubs["piezo"], piezo_dict)
+        pub(node_pubs["thermal"], thermal_dict)
+        pub(node_pubs["received_raw"], raw_with_node)
+        pub(node_pubs["radio_status"], status_obj)
+
+        # 2. Publikasikan ke topic gabungan seluruh node
+        pub(self.pub_raw, raw_with_node)
+        pub(self.pub_status, status_obj)
+
+        # 3. Kompatibilitas topic legacy (/telemetri/arduino, dll.) untuk node default
+        if node_id == self.legacy_global_node_id:
+            pub(self.pub_arduino, arduino_dict)
+            pub(self.pub_aurora, aurora_dict)
+            pub(self.pub_loadcell, loadcell_dict)
+            pub(self.pub_flex, flex_dict)
+            pub(self.pub_mcp, mcp_dict)
+            pub(self.pub_fsr, fsr_dict)
+            pub(self.pub_piezo, piezo_dict)
+            pub(self.pub_thermal, thermal_dict)
 
     # ========================================================
     # TIMEOUT FRAGMEN MENGGANTUNG (FALLBACK MODE)

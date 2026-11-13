@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-LoRa P2P Transmitter Node (ROS2) - RAK3272S (99 Parameter Sensor Terkompresi)
+LoRa P2P Transmitter Node (ROS2) - RAK3272S (Multi-Node 99 Parameter Terkompresi)
+
+Mendukung banyak node pengirim (Node 1, Node 2, dst.) menggunakan 1 file yang sama.
+Cara menjalankan:
+  - Node 1: python3 lora_transmitter_node.py 1   (atau tanpa argumen / -p node_id:=1)
+  - Node 2: python3 lora_transmitter_node.py 2   (atau -p node_id:=2)
 
 Alur:
   1. Mengumpulkan data dari topic ROS2:
-       - /telemetri/arduino  (JSON dict)
-       - /telemetri/aurora   (JSON dict)
-       - /telemetri/suit     (JSON dict opsional untuk flex/mcp/fsr/piezo/loadcell/thermal)
+       - /node<id>/telemetri/arduino, /node<id>/telemetri/aurora, /node<id>/telemetri/suit
+       - serta /telemetri/arduino, /telemetri/aurora, /telemetri/suit (jika global_topics=True)
   2. Seluruh 99 parameter dipadatkan (kompresi biner float16) ke dalam 1 paket tunggal:
        - Header magic : b"P99:" (4 byte)
+       - Node ID      : uint8 (1 byte) -> 1 untuk Node 1, 2 untuk Node 2, dst.
        - Counter      : uint16 (2 byte)
        - Data 99 param: 99 x float16 (198 byte)
        - CRC16-CCITT  : uint16 (2 byte)
-       Total ukuran    : TEPAT 206 Byte (412 karakter hex)
-  3. Karena 206 byte < batas maksimal hardware RAK3272S (250 byte / 500 hex),
-     seluruh 99 parameter dikirim HANYA 1 KALI (sekali tembak, tanpa fragmen,
-     tanpa pengiriman kedua).
+       Total ukuran    : TEPAT 207 Byte (414 karakter hex, di bawah batas 250 Byte RAK)
+  3. Dikirim HANYA 1 KALI per siklus (sekali tembak, tanpa fragmen, tanpa pengiriman kedua)
+     dengan offset waktu awal per Node ID + jitter kecil untuk menghindari tabrakan udara.
   4. Menampilkan log 1 baris horizontal bersih per pengiriman (tanpa emoji).
 """
 
@@ -24,6 +28,7 @@ import math
 import os
 import random
 import struct
+import sys
 import threading
 import time
 from collections import deque
@@ -41,6 +46,7 @@ from std_msgs.msg import String
 
 SERIAL_PORT = "/dev/ttyAMA3"
 BAUD_RATE = 115200
+NODE_ID = 1
 
 FREQUENCY = 923200000
 SPREADING_FACTOR = 6
@@ -408,10 +414,11 @@ def format_horizontal(d: dict) -> str:
 
 class LoRaTransmitterNode(Node):
 
-    def __init__(self):
-        super().__init__("lora_transmitter_node")
+    def __init__(self, default_node_id=NODE_ID, default_port=SERIAL_PORT):
+        super().__init__(f"lora_transmitter_node_{default_node_id}")
 
-        self.declare_parameter("port", SERIAL_PORT)
+        self.declare_parameter("node_id", default_node_id)
+        self.declare_parameter("port", default_port)
         self.declare_parameter("baudrate", BAUD_RATE)
         self.declare_parameter("freq", FREQUENCY)
         self.declare_parameter("sf", SPREADING_FACTOR)
@@ -420,8 +427,10 @@ class LoRaTransmitterNode(Node):
         self.declare_parameter("preamble", PREAMBLE)
         self.declare_parameter("tx_power", TX_POWER)
         self.declare_parameter("interval", TRANSMIT_INTERVAL)
+        self.declare_parameter("global_topics", True)
 
         gp = lambda n: self.get_parameter(n).value
+        self.node_id = max(1, min(255, int(gp("node_id"))))
         self.port = str(gp("port"))
         self.baud = int(gp("baudrate"))
         self.freq = int(gp("freq"))
@@ -431,6 +440,7 @@ class LoRaTransmitterNode(Node):
         self.preamble = int(gp("preamble"))
         self.tx_power = int(gp("tx_power"))
         self.interval = max(0.15, float(gp("interval")))
+        self.global_topics = bool(gp("global_topics"))
 
         self.lock = threading.Lock()
         self.latest_values = {}
@@ -441,27 +451,39 @@ class LoRaTransmitterNode(Node):
         self.packet_counter = 0
         self.last_reconnect_try = 0.0
 
-        # ROS2 subscribers
-        self.arduino_sub = self.create_subscription(
-            String,
-            "/telemetri/arduino",
-            self.arduino_callback,
-            10
+        # ROS2 subscribers spesifik node (misal /node2/telemetri/arduino)
+        self.node_ard_sub = self.create_subscription(
+            String, f"/node{self.node_id}/telemetri/arduino", self.arduino_callback, 10
         )
-        self.aurora_sub = self.create_subscription(
-            String,
-            "/telemetri/aurora",
-            self.aurora_callback,
-            10
+        self.node_aur_sub = self.create_subscription(
+            String, f"/node{self.node_id}/telemetri/aurora", self.aurora_callback, 10
         )
-        self.suit_sub = self.create_subscription(
-            String,
-            "/telemetri/suit",
-            self.arduino_callback,
-            10
+        self.node_suit_sub = self.create_subscription(
+            String, f"/node{self.node_id}/telemetri/suit", self.arduino_callback, 10
         )
 
+        # ROS2 subscribers global (/telemetri/arduino, dll.) jika diaktifkan
+        if self.global_topics:
+            self.arduino_sub = self.create_subscription(
+                String, "/telemetri/arduino", self.arduino_callback, 10
+            )
+            self.aurora_sub = self.create_subscription(
+                String, "/telemetri/aurora", self.aurora_callback, 10
+            )
+            self.suit_sub = self.create_subscription(
+                String, "/telemetri/suit", self.arduino_callback, 10
+            )
+
         self.initialize_serial()
+
+        # Offset awal agar Node 1 dan Node 2 tidak memancar tepat bersamaan
+        if self.node_id > 1:
+            phase_delay = ((self.node_id - 1) * 0.45) % self.interval
+            if phase_delay > 0.01:
+                self.get_logger().info(
+                    f"Node {self.node_id}: offset waktu awal {phase_delay:.2f}s untuk cegah tabrakan radio."
+                )
+                time.sleep(phase_delay)
 
         # Timer pengiriman paket tunggal
         self.transmit_timer = self.create_timer(
@@ -476,8 +498,8 @@ class LoRaTransmitterNode(Node):
         )
 
         self.get_logger().info(
-            f"LoRa transmitter node started on {self.port} @ {self.baud} "
-            f"(99 param compressed 206B, single packet every {self.interval}s)"
+            f"LoRa transmitter NODE {self.node_id} started on {self.port} @ {self.baud} "
+            f"(99 param compressed 207B, single packet every {self.interval}s)"
         )
 
     # ========================================================
@@ -591,11 +613,10 @@ class LoRaTransmitterNode(Node):
         if self.serial_port is None:
             return
 
-        self.get_logger().info("Configuring RAK LoRa P2P Transmitter...")
+        self.get_logger().info(f"Configuring RAK LoRa P2P Transmitter (Node {self.node_id})...")
 
         self.send_at("AT", timeout=1.0)
 
-        # Pastikan modul berada pada Mode LoRa P2P (NWM=0)
         self.serial_port.reset_input_buffer()
         self.serial_port.write(b"AT+NWM=?\r\n")
         self.serial_port.flush()
@@ -620,7 +641,6 @@ class LoRaTransmitterNode(Node):
         )
         ok_p2p = self.send_at(p2p_cmd, timeout=2.0)
 
-        # Fallback jika firmware membutuhkan nilai kHz langsung (mis. 500 menggantikan index 2)
         if not ok_p2p and self.bw == 2:
             p2p_fallback = (
                 f"AT+P2P={self.freq}:"
@@ -703,7 +723,7 @@ class LoRaTransmitterNode(Node):
         return dummy
 
     # ========================================================
-    # BUILD COMPRESSED SINGLE PACKET (206 BYTES)
+    # BUILD COMPRESSED SINGLE PACKET (207 BYTES)
     # ========================================================
 
     def build_compressed_packet(self):
@@ -731,9 +751,14 @@ class LoRaTransmitterNode(Node):
         cnt = self.packet_counter % 65536
 
         # Kemas biner terkompresi:
-        # Header "P99:" (4B) + Counter (2B) + 99 float16 (198B) + CRC16 (2B) = 206 Byte
+        # Header "P99:" (4B) + NodeID (1B) + Counter (2B) + 99 float16 (198B) + CRC16 (2B) = 207 Byte
         magic = b"P99:"
-        body = magic + struct.pack("<H", cnt) + struct.pack(f"<{len(EXPECTED_KEYS)}e", *values)
+        body = magic + struct.pack(
+            f"<BH{len(EXPECTED_KEYS)}e",
+            self.node_id & 0xFF,
+            cnt,
+            *values
+        )
         crc = crc16_ccitt(body)
         packet = body + struct.pack("<H", crc)
 
@@ -776,6 +801,9 @@ class LoRaTransmitterNode(Node):
             packet, cnt, snapshot = self.tx_queue.popleft()
 
         self.tx_active = True
+
+        # Random micro-jitter (0 - 40 ms) agar multi-node tidak terkunci bentrok
+        time.sleep(random.uniform(0.0, 0.04))
         t_start = time.time()
 
         try:
@@ -792,11 +820,11 @@ class LoRaTransmitterNode(Node):
 
             if success:
                 self.get_logger().info(
-                    f"[TX #{cnt:04d}] [{len(packet)}B 1Paket OK {elapsed_ms:.0f}ms] -> {line}"
+                    f"[TX NODE {self.node_id} #{cnt:04d}] [{len(packet)}B 1Paket OK {elapsed_ms:.0f}ms] -> {line}"
                 )
             else:
                 self.get_logger().warning(
-                    f"[TX #{cnt:04d}] [{len(packet)}B 1Paket GAGAL: {err_msg}]"
+                    f"[TX NODE {self.node_id} #{cnt:04d}] [{len(packet)}B 1Paket GAGAL: {err_msg}]"
                 )
 
         except (serial.SerialException, OSError) as exc:
@@ -851,12 +879,37 @@ class LoRaTransmitterNode(Node):
 
 
 # ============================================================
-# MAIN
+# CLI PARSER & MAIN
 # ============================================================
 
+def parse_cli_args():
+    cli_node_id = NODE_ID
+    cli_port = SERIAL_PORT
+    filtered_args = [sys.argv[0]]
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg == "--ros-args":
+            filtered_args.extend(sys.argv[i:])
+            break
+        if arg.startswith("/dev/"):
+            cli_port = arg
+        elif arg.isdigit():
+            val = int(arg)
+            if 1 <= val <= 255:
+                cli_node_id = val
+            else:
+                filtered_args.append(arg)
+        else:
+            filtered_args.append(arg)
+        i += 1
+    return cli_node_id, cli_port, filtered_args
+
+
 def main(args=None):
-    rclpy.init(args=args)
-    node = LoRaTransmitterNode()
+    cli_node_id, cli_port, filtered_args = parse_cli_args()
+    rclpy.init(args=args if args is not None else filtered_args)
+    node = LoRaTransmitterNode(default_node_id=cli_node_id, default_port=cli_port)
 
     try:
         rclpy.spin(node)
