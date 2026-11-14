@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
 """
 LoRa P2P Multi-Node Receiver Node (ROS2) - RAK3272S (1 File untuk Banyak Transmitter)
-Pasangan persis dari lora_transmitter_node.py.
 
-Fitur Utama:
-  - 1 File Receiver dapat menerima data dari Node 1, Node 2, dst. secara bersamaan.
-  - Otomatis mendeteksi identitas pengirim (node_id) dari paket biner P99 (207 Byte).
-  - Memisahkan topic ROS2 per Node secara otomatis:
-      * /node1/telemetri/{arduino, aurora, loadcell, flex, mcp, fsr, piezo, thermal, received_raw, radio_status}
-      * /node2/telemetri/{arduino, aurora, loadcell, flex, mcp, fsr, piezo, thermal, received_raw, radio_status}
-      * (serta node ID tambahan jika ada Node 3, Node 4, dst.)
-  - Topic gabungan seluruh node:
-      * /telemetri/received_raw  (memuat field "node_id" + 99 parameter)
-      * /telemetri/radio_status  (memuat field "node_id", RSSI, SNR, bytes, counter)
-  - Topic kompatibilitas legacy (/telemetri/arduino, dll.) mengikuti Node 1 secara default.
-  - Output terminal: 1 baris horizontal bersih per paket dengan label [NODE 1] / [NODE 2], tanpa emoji.
+Pasangan persis dari lora_transmitter_node.py:
+  - Menerima paket terkompresi biner P99 (207B multi-node / 206B legacy) dan fallback FRG/JSON.
+  - Memisahkan topic ROS2 otomatis per node (/node1/telemetri/..., /node2/telemetri/...).
+  - Menyediakan topic gabungan (/telemetri/received_raw dan /telemetri/radio_status).
+  - Menampilkan log terminal 1 baris horizontal bersih per paket tanpa emoji.
 """
 
 import json
-import math
-import os
-import struct
 import time
+from typing import Dict, Optional, Tuple
 
 import serial
 
@@ -29,632 +19,222 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-
-# ============================================================
-# KONFIGURASI RAK LORA (PERSIS SESUAI TRANSMITTER)
-# ============================================================
-
-SERIAL_PORT = "/dev/ttyAMA0"
-BAUD_RATE = 115200
-
-FREQUENCY = 923200000
-SPREADING_FACTOR = 6
-BANDWIDTH = 2
-CODING_RATE = 0
-PREAMBLE = 8
-TX_POWER = 20
-
-
-# ============================================================
-# URUTAN 99 PARAMETER (PERSIS SESUAI TRANSMITTER)
-# JANGAN MENGUBAH URUTAN INI TANPA MENGUBAH TRANSMITTER
-# ============================================================
-
-EXPECTED_KEYS = [
-    # Arduino UNO Q (23)
-    "lidar_raw",
-    "mq_nh3",
-    "mq_co",
-    "mq_co2",
-    "smoke",
-
-    "mpu_acc_x_raw",
-    "mpu_acc_y_raw",
-    "mpu_acc_z_raw",
-
-    "mpu_gyro_x_raw",
-    "mpu_gyro_y_raw",
-    "mpu_gyro_z_raw",
-
-    "mpu_acc_x_kalman",
-    "mpu_acc_y_kalman",
-    "mpu_acc_z_kalman",
-
-    "mpu_gyro_x_kalman",
-    "mpu_gyro_y_kalman",
-    "mpu_gyro_z_kalman",
-
-    "adxl_acc_x_raw",
-    "adxl_acc_y_raw",
-    "adxl_acc_z_raw",
-
-    "adxl_acc_x_kalman",
-    "adxl_acc_y_kalman",
-    "adxl_acc_z_kalman",
-
-    # Cosmic Aurora (12)
-    "accelx",
-    "accely",
-    "accelz",
-
-    "gyrox",
-    "gyroy",
-    "gyroz",
-
-    "bme_temp",
-    "bme_hum",
-    "bme_pres",
-    "bme_alt",
-
-    "sound_dbLeft",
-    "sound_dbRight",
-
-    # Loadcells (5)
-    "loadcell_paka",
-    "loadcell_paki",
-    "loadcell_leher",
-    "loadcell_kaka",
-    "loadcell_kaki",
-
-    # Flex Sensors (16)
-    "flex1",
-    "flex2",
-    "flex3",
-    "flex4",
-    "flex5",
-    "flex6",
-    "flex7",
-    "flex8",
-    "flex9",
-    "flex10",
-    "flex11",
-    "flex12",
-    "flex13",
-    "flex14",
-    "flex15",
-    "flex16",
-
-    # MCP Sensors (14)
-    "mcp1",
-    "mcp2",
-    "mcp3",
-    "mcp4",
-    "mcp5",
-    "mcp6",
-    "mcp7",
-    "mcp8",
-    "mcp9",
-    "mcp10",
-    "mcp11",
-    "mcp12",
-    "mcp13",
-    "mcp14",
-
-    # FSR Sensors (14)
-    "fsr1",
-    "fsr2",
-    "fsr3",
-    "fsr4",
-    "fsr5",
-    "fsr6",
-    "fsr7",
-    "fsr8",
-    "fsr9",
-    "fsr10",
-    "fsr11",
-    "fsr12",
-    "fsr13",
-    "fsr14",
-
-    # Piezo Sensors (14)
-    "piezo1",
-    "piezo2",
-    "piezo3",
-    "piezo4",
-    "piezo5",
-    "piezo6",
-    "piezo7",
-    "piezo8",
-    "piezo9",
-    "piezo10",
-    "piezo11",
-    "piezo12",
-    "piezo13",
-    "piezo14",
-
-    # Thermal Sensor (1)
-    "thermal",
-]
-
-NUM_PARAMS = len(EXPECTED_KEYS)
-PACKET_SIZE_MULTINODE = 4 + 1 + 2 + (NUM_PARAMS * 2) + 2  # 207 Bytes (with node_id)
-PACKET_SIZE_LEGACY = 4 + 2 + (NUM_PARAMS * 2) + 2        # 206 Bytes (legacy single-node)
+from lora_common import (
+    EXPECTED_KEYS,
+    NUM_PARAMS,
+    PACKET_MAGIC,
+    PACKET_SIZE_MULTINODE,
+    SENSOR_GROUPS,
+    RakP2PRadio,
+    crc16_ccitt,
+    declare_radio_config,
+    decode_p99_packet,
+    format_horizontal,
+    parse_rx_event,
+)
 
 
-# ============================================================
-# CRC16-CCITT (PERSIS TRANSMITTER)
-# ============================================================
-
-def crc16_ccitt(data: bytes) -> int:
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc
+DEFAULT_SERIAL_PORT = "/dev/ttyAMA0"
+FALLBACK_PORTS = ("/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0")
 
 
-# ============================================================
-# FORMAT LOG HORIZONTAL 1 BARIS BERSIH (99 PARAMETER)
-# ============================================================
-
-def format_horizontal(d: dict) -> str:
-    g = lambda k: d.get(k, "-")
-    p = [
-        f"Lidar:{g('lidar_raw')}",
-        f"MQ(NH3:{g('mq_nh3')},CO:{g('mq_co')},CO2:{g('mq_co2')})",
-        f"Smoke:{g('smoke')}",
-        f"MPU_Raw[A:({g('mpu_acc_x_raw')},{g('mpu_acc_y_raw')},{g('mpu_acc_z_raw')}) G:({g('mpu_gyro_x_raw')},{g('mpu_gyro_y_raw')},{g('mpu_gyro_z_raw')})]",
-        f"MPU_Klm[A:({g('mpu_acc_x_kalman')},{g('mpu_acc_y_kalman')},{g('mpu_acc_z_kalman')}) G:({g('mpu_gyro_x_kalman')},{g('mpu_gyro_y_kalman')},{g('mpu_gyro_z_kalman')})]",
-        f"ADXL_Raw:({g('adxl_acc_x_raw')},{g('adxl_acc_y_raw')},{g('adxl_acc_z_raw')})",
-        f"ADXL_Klm:({g('adxl_acc_x_kalman')},{g('adxl_acc_y_kalman')},{g('adxl_acc_z_kalman')})",
-        f"LSM6DS3[A:({g('accelx')},{g('accely')},{g('accelz')}) G:({g('gyrox')},{g('gyroy')},{g('gyroz')})]",
-        f"BME280({g('bme_temp')}C,{g('bme_hum')}%,{g('bme_pres')}hPa,{g('bme_alt')}m)",
-        f"Sound(L:{g('sound_dbLeft')},R:{g('sound_dbRight')}dB)",
-        f"Loadcell({g('loadcell_paka')},{g('loadcell_paki')},{g('loadcell_leher')},{g('loadcell_kaka')},{g('loadcell_kaki')})",
-        f"Flex[{','.join(str(g(f'flex{i}')) for i in range(1, 17))}]",
-        f"MCP[{','.join(str(g(f'mcp{i}')) for i in range(1, 15))}]",
-        f"FSR[{','.join(str(g(f'fsr{i}')) for i in range(1, 15))}]",
-        f"Piezo[{','.join(str(g(f'piezo{i}')) for i in range(1, 15))}]",
-        f"Thermal:{g('thermal')}",
-    ]
-    return " | ".join(p)
+def publish_json(publisher, payload: object) -> None:
+    """Mengemas object Python ke std_msgs/String JSON dan mempublikasikannya."""
+    msg = String()
+    msg.data = json.dumps(payload)
+    publisher.publish(msg)
 
 
-# ============================================================
-# NODE ROS2 MULTI-NODE RECEIVER
-# ============================================================
+class FragmentAssembler:
+    """Menangani reassembly paket legacy berheader FRG:index/total secara aman."""
+
+    def __init__(self, timeout_sec: float):
+        self.timeout_sec = timeout_sec
+        self._chunks: Dict[int, bytes] = {}
+        self._total: int = 0
+        self._start_time: float = 0.0
+
+    def add_fragment(self, raw_bytes: bytes) -> Optional[Tuple[bytes, int, float]]:
+        """Menambahkan fragmen FRG; mengembalikan (complete_data, total, elapsed_ms) jika utuh."""
+        meta, chunk = raw_bytes[4:].split(b":", 1)
+        idx_str, tot_str = meta.decode("ascii").split("/")
+        idx, total = int(idx_str), int(tot_str)
+        now = time.monotonic()
+
+        if idx == 1 or total != self._total:
+            self._chunks.clear()
+            self._total = total
+            self._start_time = now
+
+        self._chunks[idx] = chunk
+        if len(self._chunks) < self._total:
+            return None
+
+        complete_data = b"".join(self._chunks[i] for i in range(1, self._total + 1))
+        elapsed_ms = (now - self._start_time) * 1000.0
+        completed_total = self._total
+        self.reset()
+        return complete_data, completed_total, elapsed_ms
+
+    def expire_if_stale(self) -> Optional[Tuple[int, int]]:
+        """Membersihkan fragmen menggantung bila melewati batas timeout."""
+        if not self._chunks:
+            return None
+        if (time.monotonic() - self._start_time) <= self.timeout_sec:
+            return None
+        dropped = (len(self._chunks), self._total)
+        self.reset()
+        return dropped
+
+    def reset(self) -> None:
+        self._chunks.clear()
+        self._total = 0
+
 
 class LoRaReceiverNode(Node):
+    """Node ROS2 receiver LoRa P2P yang melayani multi-transmitter dalam 1 file."""
 
-    def __init__(self):
+    def __init__(self, default_port: str = DEFAULT_SERIAL_PORT):
         super().__init__("lora_receiver_node")
 
-        # ---- Parameters ----
-        self.declare_parameter("port", SERIAL_PORT)
-        self.declare_parameter("baudrate", BAUD_RATE)
-        self.declare_parameter("freq", FREQUENCY)
-        self.declare_parameter("sf", SPREADING_FACTOR)
-        self.declare_parameter("bw", BANDWIDTH)
-        self.declare_parameter("cr", CODING_RATE)
-        self.declare_parameter("preamble", PREAMBLE)
-        self.declare_parameter("tx_power", TX_POWER)
+        radio_config = declare_radio_config(self, default_port)
         self.declare_parameter("frag_timeout", 3.0)
         self.declare_parameter("legacy_global_node_id", 1)
 
-        gp = lambda n: self.get_parameter(n).value
-        self.port = str(gp("port"))
-        self.baud = int(gp("baudrate"))
-        self.freq = int(gp("freq"))
-        self.sf = int(gp("sf"))
-        self.bw = int(gp("bw"))
-        self.cr = int(gp("cr"))
-        self.preamble = int(gp("preamble"))
-        self.tx_power = int(gp("tx_power"))
-        self.frag_timeout = float(gp("frag_timeout"))
-        self.legacy_global_node_id = int(gp("legacy_global_node_id"))
-
-        # ---- Serial & State ----
-        self.serial_port = None
-        self.rx_buffer = ""
-        self.last_reconnect_try = 0.0
+        frag_timeout = float(self.get_parameter("frag_timeout").value)
+        self.legacy_global_node_id = int(
+            self.get_parameter("legacy_global_node_id").value
+        )
 
         self.packet_count = 0
-        self.node_packet_counts = {}
-        self.frag_buffer = {}
-        self.frag_total = 0
-        self.frag_start_time = 0.0
+        self.node_packet_counts: Dict[int, int] = {}
         self.last_rssi = "-"
         self.last_snr = "-"
+        self.assembler = FragmentAssembler(frag_timeout)
 
-        # ---- Global / Combined Publishers ----
-        self.pub_arduino = self.create_publisher(String, "/telemetri/arduino", 10)
-        self.pub_aurora = self.create_publisher(String, "/telemetri/aurora", 10)
-        self.pub_loadcell = self.create_publisher(String, "/telemetri/loadcell", 10)
-        self.pub_flex = self.create_publisher(String, "/telemetri/flex", 10)
-        self.pub_mcp = self.create_publisher(String, "/telemetri/mcp", 10)
-        self.pub_fsr = self.create_publisher(String, "/telemetri/fsr", 10)
-        self.pub_piezo = self.create_publisher(String, "/telemetri/piezo", 10)
-        self.pub_thermal = self.create_publisher(String, "/telemetri/thermal", 10)
-        self.pub_raw = self.create_publisher(String, "/telemetri/received_raw", 10)
-        self.pub_status = self.create_publisher(String, "/telemetri/radio_status", 10)
-
-        # ---- Per-Node Publishers (Node 1, Node 2, dan dinamis untuk node lain) ----
-        self.node_publishers = {}
+        # Publisher global & per-node menggunakan helper yang seragam
+        self.global_pubs = self._create_topic_bundle("/telemetri")
+        self.node_publishers: Dict[int, Dict[str, object]] = {}
         self.get_or_create_node_publishers(1)
         self.get_or_create_node_publishers(2)
 
-        # ---- Initialize Serial & Radio ----
-        self.initialize_serial()
+        self.radio = RakP2PRadio(
+            config=radio_config,
+            fallback_ports=FALLBACK_PORTS,
+            logger=self.get_logger(),
+            rx_mode=True,
+        )
+        self.radio.connect()
 
-        # ---- Timers ----
         self.create_timer(0.005, self.read_serial_data)
         self.create_timer(0.5, self.check_frag_timeout)
 
         self.get_logger().info(
-            f"LoRa multi-node receiver started on {self.port} @ {self.baud} "
-            f"(Listening for Node 1, Node 2, etc. | 99 params / {PACKET_SIZE_MULTINODE}B)"
+            f"LoRa multi-node receiver started on {self.radio.active_port} "
+            f"@ {radio_config.baudrate} (Node 1, Node 2, etc. | {NUM_PARAMS} params / "
+            f"{PACKET_SIZE_MULTINODE}B)"
         )
 
-    def get_or_create_node_publishers(self, node_id: int) -> dict:
+    def _create_topic_bundle(self, prefix: str) -> Dict[str, object]:
+        topic_names = tuple(SENSOR_GROUPS.keys()) + ("received_raw", "radio_status")
+        return {
+            name: self.create_publisher(String, f"{prefix}/{name}", 10)
+            for name in topic_names
+        }
+
+    def get_or_create_node_publishers(self, node_id: int) -> Dict[str, object]:
         if node_id not in self.node_publishers:
-            prefix = f"/node{node_id}/telemetri"
-            self.node_publishers[node_id] = {
-                "arduino": self.create_publisher(String, f"{prefix}/arduino", 10),
-                "aurora": self.create_publisher(String, f"{prefix}/aurora", 10),
-                "loadcell": self.create_publisher(String, f"{prefix}/loadcell", 10),
-                "flex": self.create_publisher(String, f"{prefix}/flex", 10),
-                "mcp": self.create_publisher(String, f"{prefix}/mcp", 10),
-                "fsr": self.create_publisher(String, f"{prefix}/fsr", 10),
-                "piezo": self.create_publisher(String, f"{prefix}/piezo", 10),
-                "thermal": self.create_publisher(String, f"{prefix}/thermal", 10),
-                "received_raw": self.create_publisher(String, f"{prefix}/received_raw", 10),
-                "radio_status": self.create_publisher(String, f"{prefix}/radio_status", 10),
-            }
+            self.node_publishers[node_id] = self._create_topic_bundle(
+                f"/node{node_id}/telemetri"
+            )
         return self.node_publishers[node_id]
 
-    # ========================================================
-    # SERIAL INITIALIZATION
-    # ========================================================
-
-    def initialize_serial(self):
-        candidate_ports = [self.port, "/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0"]
-        chosen_port = None
-
-        for p in candidate_ports:
-            if os.path.exists(p):
-                chosen_port = p
-                break
-
-        if not chosen_port:
-            chosen_port = self.port
-
-        try:
-            self.serial_port = serial.Serial(
-                port=chosen_port,
-                baudrate=self.baud,
-                timeout=0.1,
-                write_timeout=1.0,
-                rtscts=False
-            )
-            self.port = chosen_port
-            time.sleep(0.5)
-
-            self.serial_port.reset_input_buffer()
-            self.serial_port.reset_output_buffer()
-
-            self.get_logger().info(
-                f"RAK connected: {self.port}"
-            )
-            self.configure_rak()
-
-        except Exception as error:
-            self.get_logger().error(
-                f"RAK connection failed on {chosen_port}: {error}"
-            )
-            self.serial_port = None
-
-    def try_reconnect(self):
-        now = time.monotonic()
-        if now - self.last_reconnect_try < 3.0:
-            return
-        self.last_reconnect_try = now
-
-        if self.serial_port is not None:
-            try:
-                self.serial_port.close()
-            except Exception:
-                pass
-            self.serial_port = None
-
-        self.get_logger().warning("Mencoba reconnect ke port RAK3272S...")
-        self.initialize_serial()
-
-    # ========================================================
-    # SEND AT COMMAND
-    # ========================================================
-
-    def send_at(self, command, timeout=2.0):
-        if self.serial_port is None:
-            return False
-
-        try:
-            self.serial_port.reset_input_buffer()
-            self.serial_port.write((command + "\r\n").encode())
-            self.serial_port.flush()
-
-            start_time = time.time()
-            response = ""
-
-            while time.time() - start_time < timeout:
-                if self.serial_port.in_waiting:
-                    data = self.serial_port.read(self.serial_port.in_waiting)
-                    response += data.decode(errors="ignore")
-
-                    if "ERROR" in response:
-                        self.get_logger().error(
-                            f"AT error: {command} | {response.strip()}"
-                        )
-                        return False
-
-                    if "OK" in response:
-                        self.get_logger().info(
-                            f"AT OK: {command}"
-                        )
-                        return True
-
-                time.sleep(0.02)
-
-            self.get_logger().warning(
-                f"AT timeout: {command} | {response.strip()}"
-            )
-            return False
-
-        except Exception as error:
-            self.get_logger().error(
-                f"AT command failed: {error}"
-            )
-            return False
-
-    # ========================================================
-    # CONFIGURE RAK RECEIVER
-    # ========================================================
-
-    def configure_rak(self):
-        if self.serial_port is None:
-            return
-
-        self.get_logger().info("Configuring RAK LoRa P2P Receiver...")
-
-        self.send_at("AT", timeout=1.0)
-
-        self.serial_port.reset_input_buffer()
-        self.serial_port.write(b"AT+NWM=?\r\n")
-        self.serial_port.flush()
-        time.sleep(0.3)
-        res_nwm = self.serial_port.read_all().decode(errors="ignore")
-
-        if "=0" not in res_nwm:
-            self.get_logger().info("Mengubah RAK ke mode LoRa P2P (AT+NWM=0)...")
-            self.send_at("AT+NWM=0", timeout=2.0)
-            time.sleep(2.0)
-            self.send_at("AT", timeout=1.0)
-
-        self.send_at("AT+PRECV=0", timeout=1.0)
-
-        p2p_cmd = (
-            f"AT+P2P={self.freq}:"
-            f"{self.sf}:"
-            f"{self.bw}:"
-            f"{self.cr}:"
-            f"{self.preamble}:"
-            f"{self.tx_power}"
-        )
-        ok_p2p = self.send_at(p2p_cmd, timeout=2.0)
-
-        if not ok_p2p and self.bw == 2:
-            p2p_fallback = (
-                f"AT+P2P={self.freq}:"
-                f"{self.sf}:"
-                f"500:"
-                f"{self.cr}:"
-                f"{self.preamble}:"
-                f"{self.tx_power}"
-            )
-            self.send_at(p2p_fallback, timeout=2.0)
-
-        res_recv = self.send_at("AT+PRECV=65534", timeout=2.0)
-        if not res_recv:
-            self.get_logger().info("Fallback AT+PRECV=65535...")
-            self.send_at("AT+PRECV=65535", timeout=2.0)
-
-        self.get_logger().info("RAK Receiver configuration sequence completed.")
-
-    # ========================================================
-    # BACA DATA DARI SERIAL
-    # ========================================================
-
-    def read_serial_data(self):
-        if self.serial_port is None or not self.serial_port.is_open:
-            self.try_reconnect()
+    def read_serial_data(self) -> None:
+        """Membaca event RXP2P dari port serial modul RAK3272S."""
+        if not self.radio.is_connected:
+            self.radio.reconnect_if_due()
             return
 
         try:
-            n = self.serial_port.in_waiting
-            if n <= 0:
-                return
-
-            data = self.serial_port.read(n)
-            self.rx_buffer += data.decode("ascii", errors="replace")
-
-            while "\n" in self.rx_buffer:
-                line, self.rx_buffer = self.rx_buffer.split("\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-
-                if "+EVT:RXP2P" in line or "RXP2P" in line:
-                    rssi, snr, hex_str = self.parse_rx_line(line)
-                    if hex_str:
-                        try:
-                            raw_bytes = bytes.fromhex(hex_str)
-                            self.handle_received_bytes(raw_bytes, rssi, snr)
-                        except ValueError:
-                            self.get_logger().error(f"Gagal konversi hex: {hex_str[:30]}")
-
-            if len(self.rx_buffer) > 16384:
-                self.rx_buffer = ""
-
+            lines = self.radio.read_lines()
         except (serial.SerialException, OSError) as exc:
             self.get_logger().error(f"Serial read error: {exc}")
-            self.try_reconnect()
+            self.radio.reconnect_if_due()
+            return
 
-    def parse_rx_line(self, line: str):
-        """Mengekstrak RSSI, SNR, dan hex string dari event RXP2P secara tangguh."""
-        if "+EVT:RXP2P" not in line and "RXP2P" not in line:
-            return None, None, None
+        for line in lines:
+            parsed = parse_rx_event(line)
+            if parsed is None:
+                continue
+            rssi, snr, hex_str = parsed
+            try:
+                raw_bytes = bytes.fromhex(hex_str)
+            except ValueError:
+                self.get_logger().error(f"Gagal konversi hex: {hex_str[:30]}")
+                continue
+            self.handle_received_bytes(raw_bytes, rssi, snr)
 
-        idx = line.find("RXP2P")
-        after = line[idx + len("RXP2P"):].strip()
-        after = after.lstrip(": ")
-        tokens = [t.strip() for t in after.split(":") if t.strip()]
-
-        if len(tokens) >= 3:
-            rssi = tokens[0]
-            snr = tokens[1]
-            hex_str = ":".join(tokens[2:]).strip()
-            if hex_str.upper() in ["TIMEOUT", "ERROR", "RECEIVE TIMEOUT"]:
-                return None, None, None
-            return rssi, snr, hex_str
-
-        parts = line.split()
-        if len(parts) >= 3:
-            hex_str = parts[-1].strip()
-            if hex_str.upper() in ["TIMEOUT", "ERROR", "RECEIVE TIMEOUT"]:
-                return None, None, None
-            rssi = parts[-3].strip() if len(parts) >= 4 else "-"
-            snr = parts[-2].strip() if len(parts) >= 4 else "-"
-            return rssi, snr, hex_str
-
-        return None, None, None
-
-    # ========================================================
-    # ROUTE PAKET MASUK (KOMPRESI P99 ATAU FALLBACK FRG/JSON)
-    # ========================================================
-
-    def handle_received_bytes(self, raw_bytes: bytes, rssi: str, snr: str):
+    def handle_received_bytes(self, raw_bytes: bytes, rssi: str, snr: str) -> None:
+        """Merutekan payload biner P99, fragmen FRG, atau JSON mentah."""
         self.last_rssi = rssi or "-"
         self.last_snr = snr or "-"
 
-        # 1. Jalur Utama: Paket Kompresi Biner "P99:" (207B multi-node atau 206B legacy)
-        if raw_bytes.startswith(b"P99:"):
+        if raw_bytes.startswith(PACKET_MAGIC):
             self.process_compressed_p99(raw_bytes)
             return
 
-        # 2. Fallback: Paket Fragmen "FRG:i/n:<chunk>"
         if raw_bytes.startswith(b"FRG:"):
-            now = time.monotonic()
             try:
-                meta, chunk = raw_bytes[4:].split(b":", 1)
-                idx_str, tot_str = meta.decode("ascii").split("/")
-                idx, total = int(idx_str), int(tot_str)
-
-                if idx == 1 or total != self.frag_total:
-                    self.frag_buffer.clear()
-                    self.frag_total = total
-                    self.frag_start_time = now
-
-                self.frag_buffer[idx] = chunk
-
-                if len(self.frag_buffer) == self.frag_total:
-                    complete_data = b"".join(
-                        self.frag_buffer[i] for i in range(1, self.frag_total + 1)
-                    )
-                    elapsed_ms = (now - self.frag_start_time) * 1000
-                    total_frags = self.frag_total
-
-                    self.frag_buffer.clear()
-                    self.frag_total = 0
-
-                    self.process_json_payload(complete_data, total_frags, elapsed_ms)
-
-            except Exception as err:
-                self.get_logger().error(f"Gagal memproses fragmen: {err}")
+                assembled = self.assembler.add_fragment(raw_bytes)
+            except Exception as exc:
+                self.get_logger().error(f"Gagal memproses fragmen: {exc}")
+                return
+            if assembled is not None:
+                complete_data, total_frags, elapsed_ms = assembled
+                self.process_json_payload(complete_data, total_frags, elapsed_ms)
             return
 
-        # 3. Fallback: Raw JSON tanpa awalan
         self.process_json_payload(raw_bytes, total_frags=1, elapsed_ms=0.0)
 
-    # ========================================================
-    # DECODE PAKET KOMPRESI BINER P99 (207 BYTE MULTI-NODE)
-    # ========================================================
-
-    def process_compressed_p99(self, raw_bytes: bytes):
+    def process_compressed_p99(self, raw_bytes: bytes) -> None:
+        """Memverifikasi dan mendekode paket biner terkompresi P99."""
         self.packet_count += 1
-
-        if len(raw_bytes) not in (PACKET_SIZE_MULTINODE, PACKET_SIZE_LEGACY):
-            self.get_logger().warning(
-                f"[RX #{self.packet_count}] Panjang paket P99 tidak sesuai: "
-                f"{len(raw_bytes)}B (seharusnya {PACKET_SIZE_MULTINODE}B). Paket dibuang."
-            )
+        try:
+            node_id, tx_counter, sensor_dict = decode_p99_packet(raw_bytes)
+        except ValueError as exc:
+            self.get_logger().warning(f"[RX #{self.packet_count}] {exc}. Paket dibuang.")
             return
-
-        body = raw_bytes[:-2]
-        expected_crc = struct.unpack("<H", raw_bytes[-2:])[0]
-        actual_crc = crc16_ccitt(body)
-
-        if actual_crc != expected_crc:
-            self.get_logger().warning(
-                f"[RX #{self.packet_count}] CRC MISMATCH! "
-                f"(Dihitung: {actual_crc:04X}, Diterima: {expected_crc:04X}). Paket dibuang."
-            )
-            return
-
-        if len(raw_bytes) == PACKET_SIZE_MULTINODE:
-            node_id, tx_counter, *raw_values = struct.unpack(
-                f"<BH{NUM_PARAMS}e", raw_bytes[4:PACKET_SIZE_MULTINODE - 2]
-            )
-        else:
-            node_id = 1
-            tx_counter, *raw_values = struct.unpack(
-                f"<H{NUM_PARAMS}e", raw_bytes[4:PACKET_SIZE_LEGACY - 2]
-            )
-
-        sensor_dict = {}
-        for key, val in zip(EXPECTED_KEYS, raw_values):
-            fval = float(val)
-            if not math.isfinite(fval):
-                fval = 0.0
-            sensor_dict[key] = round(fval, 3)
 
         self.publish_and_log(
-            sensor_dict, len(raw_bytes), 1, 0.0, node_id=node_id, tx_counter=tx_counter
+            sensor_dict=sensor_dict,
+            byte_len=len(raw_bytes),
+            total_frags=1,
+            elapsed_ms=0.0,
+            node_id=node_id,
+            tx_counter=tx_counter,
         )
 
-    # ========================================================
-    # DECODE PAKET JSON FALLBACK
-    # ========================================================
-
-    def process_json_payload(self, complete_data: bytes, total_frags: int, elapsed_ms: float):
+    def process_json_payload(
+        self, complete_data: bytes, total_frags: int, elapsed_ms: float
+    ) -> None:
+        """Memverifikasi opsional CRC16 dan mem-parse fallback JSON list."""
         self.packet_count += 1
+        json_bytes = complete_data
 
         if b"*" in complete_data:
-            json_bytes, crc_bytes = complete_data.rsplit(b"*", 1)
+            candidate_json, crc_bytes = complete_data.rsplit(b"*", 1)
             try:
                 expected_crc = int(crc_bytes.decode("ascii"), 16)
-                actual_crc = crc16_ccitt(json_bytes)
-                if actual_crc != expected_crc:
+            except ValueError:
+                expected_crc = None
+
+            if expected_crc is not None:
+                if crc16_ccitt(candidate_json) != expected_crc:
                     self.get_logger().warning(
                         f"[RX #{self.packet_count}] CRC MISMATCH JSON!"
                     )
                     return
-            except Exception:
-                json_bytes = complete_data
-        else:
-            json_bytes = complete_data
+                json_bytes = candidate_json
 
         try:
             values = json.loads(json_bytes.decode("utf-8"))
@@ -666,30 +246,38 @@ class LoRaReceiverNode(Node):
             self.get_logger().warning(f"Format payload bukan list angka: {type(values)}")
             return
 
-        sensor_dict = {key: val for key, val in zip(EXPECTED_KEYS, values)}
-        self.publish_and_log(sensor_dict, len(complete_data), total_frags, elapsed_ms, node_id=1)
+        sensor_dict = dict(zip(EXPECTED_KEYS, values))
+        self.publish_and_log(
+            sensor_dict=sensor_dict,
+            byte_len=len(complete_data),
+            total_frags=total_frags,
+            elapsed_ms=elapsed_ms,
+            node_id=1,
+        )
 
-    # ========================================================
-    # LOG 1 BARIS HORIZONTAL & PUBLISH ROS2 TOPICS PER NODE
-    # ========================================================
+    def publish_and_log(
+        self,
+        sensor_dict: Dict[str, float],
+        byte_len: int,
+        total_frags: int,
+        elapsed_ms: float,
+        node_id: int = 1,
+        tx_counter: Optional[int] = None,
+    ) -> None:
+        """Mencatat 1 baris log horizontal dan menerbitkan data ke topic ROS2 per node."""
+        node_pkt_cnt = self.node_packet_counts.get(node_id, 0) + 1
+        self.node_packet_counts[node_id] = node_pkt_cnt
 
-    def publish_and_log(self, sensor_dict: dict, byte_len: int, total_frags: int,
-                        elapsed_ms: float, node_id: int = 1, tx_counter: int = None):
-        self.node_packet_counts[node_id] = self.node_packet_counts.get(node_id, 0) + 1
-        node_pkt_cnt = self.node_packet_counts[node_id]
+        grouped_payloads = {
+            group_name: {
+                k: sensor_dict.get(k, 0.0) if group_name == "thermal" else sensor_dict[k]
+                for k in group_keys
+                if group_name == "thermal" or k in sensor_dict
+            }
+            for group_name, group_keys in SENSOR_GROUPS.items()
+        }
 
-        arduino_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[:23] if k in sensor_dict}
-        aurora_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[23:35] if k in sensor_dict}
-        loadcell_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[35:40] if k in sensor_dict}
-        flex_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[40:56] if k in sensor_dict}
-        mcp_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[56:70] if k in sensor_dict}
-        fsr_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[70:84] if k in sensor_dict}
-        piezo_dict = {k: sensor_dict[k] for k in EXPECTED_KEYS[84:98] if k in sensor_dict}
-        thermal_dict = {"thermal": sensor_dict.get("thermal", 0.0)}
-
-        raw_with_node = {"node_id": node_id}
-        raw_with_node.update(sensor_dict)
-
+        raw_with_node = {"node_id": node_id, **sensor_dict}
         status_obj = {
             "node_id": node_id,
             "packet_count": self.packet_count,
@@ -699,83 +287,48 @@ class LoRaReceiverNode(Node):
             "fragments": total_frags,
             "rssi": self.last_rssi,
             "snr": self.last_snr,
-            "elapsed_ms": round(elapsed_ms, 1)
+            "elapsed_ms": round(elapsed_ms, 1),
         }
 
-        line = format_horizontal(sensor_dict)
+        pkt_label = "1Paket" if total_frags == 1 else f"{total_frags}Frg"
         cnt_info = f"Cnt:{tx_counter}" if tx_counter is not None else f"{elapsed_ms:.0f}ms"
         self.get_logger().info(
             f"[RX #{self.packet_count:04d}] [NODE {node_id} #{node_pkt_cnt:04d}] "
-            f"[{byte_len}B 1Paket {cnt_info}] [{self.last_rssi}dBm {self.last_snr}dB] "
-            f"[{len(sensor_dict)}/{NUM_PARAMS} param] -> {line}"
+            f"[{byte_len}B {pkt_label} {cnt_info}] [{self.last_rssi}dBm {self.last_snr}dB] "
+            f"[{len(sensor_dict)}/{NUM_PARAMS} param] -> {format_horizontal(sensor_dict)}"
         )
 
-        def pub(publisher, payload_obj):
-            m = String()
-            m.data = json.dumps(payload_obj)
-            publisher.publish(m)
-
-        # 1. Publikasikan ke topic spesifik node (/node1/telemetri/..., /node2/telemetri/...)
+        # 1. Topic terpisah per node (/node1/telemetri/..., /node2/telemetri/...)
         node_pubs = self.get_or_create_node_publishers(node_id)
-        pub(node_pubs["arduino"], arduino_dict)
-        pub(node_pubs["aurora"], aurora_dict)
-        pub(node_pubs["loadcell"], loadcell_dict)
-        pub(node_pubs["flex"], flex_dict)
-        pub(node_pubs["mcp"], mcp_dict)
-        pub(node_pubs["fsr"], fsr_dict)
-        pub(node_pubs["piezo"], piezo_dict)
-        pub(node_pubs["thermal"], thermal_dict)
-        pub(node_pubs["received_raw"], raw_with_node)
-        pub(node_pubs["radio_status"], status_obj)
+        for group_name, payload in grouped_payloads.items():
+            publish_json(node_pubs[group_name], payload)
+        publish_json(node_pubs["received_raw"], raw_with_node)
+        publish_json(node_pubs["radio_status"], status_obj)
 
-        # 2. Publikasikan ke topic gabungan seluruh node
-        pub(self.pub_raw, raw_with_node)
-        pub(self.pub_status, status_obj)
+        # 2. Topic gabungan seluruh node
+        publish_json(self.global_pubs["received_raw"], raw_with_node)
+        publish_json(self.global_pubs["radio_status"], status_obj)
 
-        # 3. Kompatibilitas topic legacy (/telemetri/arduino, dll.) untuk node default
+        # 3. Topic legacy (/telemetri/arduino, dll.) khusus node default
         if node_id == self.legacy_global_node_id:
-            pub(self.pub_arduino, arduino_dict)
-            pub(self.pub_aurora, aurora_dict)
-            pub(self.pub_loadcell, loadcell_dict)
-            pub(self.pub_flex, flex_dict)
-            pub(self.pub_mcp, mcp_dict)
-            pub(self.pub_fsr, fsr_dict)
-            pub(self.pub_piezo, piezo_dict)
-            pub(self.pub_thermal, thermal_dict)
+            for group_name, payload in grouped_payloads.items():
+                publish_json(self.global_pubs[group_name], payload)
 
-    # ========================================================
-    # TIMEOUT FRAGMEN MENGGANTUNG (FALLBACK MODE)
-    # ========================================================
-
-    def check_frag_timeout(self):
-        if self.frag_buffer and (time.monotonic() - self.frag_start_time) > self.frag_timeout:
+    def check_frag_timeout(self) -> None:
+        dropped = self.assembler.expire_if_stale()
+        if dropped is not None:
+            received, total = dropped
             self.get_logger().warning(
-                f"Fragmen tidak lengkap dalam {self.frag_timeout}s "
-                f"({len(self.frag_buffer)}/{self.frag_total}), dibatalkan."
+                f"Fragmen tidak lengkap dalam {self.assembler.timeout_sec}s "
+                f"({received}/{total}), dibatalkan."
             )
-            self.frag_buffer.clear()
-            self.frag_total = 0
 
-    # ========================================================
-    # SHUTDOWN
-    # ========================================================
-
-    def destroy_node(self):
-        if self.serial_port is not None and self.serial_port.is_open:
-            try:
-                self.serial_port.write(b"AT+PRECV=0\r\n")
-                time.sleep(0.1)
-            except Exception:
-                pass
-            self.serial_port.close()
+    def destroy_node(self) -> None:
+        self.radio.close(stop_rx=True)
         super().destroy_node()
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
-def main(args=None):
+def main(args=None) -> None:
     rclpy.init(args=args)
     node = LoRaReceiverNode()
 
