@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-LoRa P2P Receiver Node (ROS2) - RAK3272S + Direct Web Forwarder (1 File Standalone)
+LoRa P2P Receiver Node (ROS2) - RAK3272S + Direct Web Forwarder + Local Communication Logger
+(1 File Standalone)
 
 Fitur:
   - Mandiri 1 file utuh tanpa perlu file modul tambahan (cukup jalankan lora_rxManekin1.py).
@@ -10,23 +11,28 @@ Fitur:
       1. Array JSON 109 parameter sensor (payload_mode == "array", mendukung nilai null)
       2. Web Compact V2 JSON (payload_mode == "web_v2", readingId 1001..1095 / 2001..2095)
       3. Alert kompak 12-byte ASCII ("A1" + seq + severity + event + status + offline_mask)
+  - MENYIMPAN DATA KOMUNIKASI LORA & TELEMETRI SECARA LOKAL DI RASPBERRY PI:
+      Folder default: ~/blackbox2_ws/logs/communication/ (parameter ROS2 `log_dir`):
+      1. lora_rx_communication.csv : RSSI (dBm), SNR (dB), ukuran byte, fragmen, waktu reassembly (ms),
+                                     interval antar-paket / jitter (ms), packet rate (Hz), status CRC16,
+                                     total CRC error, frekuensi, SF, BW, CR, jumlah sensor valid, & status ACK Web.
+      2. lora_rx_telemetry.csv     : Timestamp, RSSI, SNR, ukuran byte + seluruh 109 kolom nilai sensor.
+      3. lora_rx_alerts.csv        : Timestamp, RSSI, SNR + detail alert kompak 12-byte yang diterima.
   - LANGSUNG MENGIRIM KE WEB BACKEND (Be-smart-manekin) pada background thread non-blocking:
       1. Jalur Utama MQTT Compact V2:
          Publish ke topic `smart-mannequin/{device_id}/telemetry` (QoS 1, retain=False)
          & subscribe ACK `smart-mannequin/{device_id}/ack`.
-         (Mendukung paho-mqtt jika terinstal, atau otomatis fallback ke built-in Pure Python
-         Raw-Socket MQTT v3.1.1 client tanpa perlu install library tambahan).
       2. Jalur Opsional HTTP REST Ingest (`urllib.request`):
-         POST ke `/sensor-reading/batch` (SmartSkin 59 sensor) & `/sensor/*` (LiDAR, MQ, ADXL,
-         BME280, Loadcell 801..805, WitMotion, Sound KY 601..602) dengan header `x-ingest-key`.
+         POST ke `/sensor-reading/batch` & `/sensor/*` dengan header `x-ingest-key`.
   - Mempublikasikan ke topic ROS2:
       /telemetri/web/v2, /system/alerts, /telemetri/received_raw, /telemetri/radio_status,
       serta /telemetri/{arduino,aurora,loadcell,flex,mcp,fsr,piezo,thermal,witmotion}.
-  - Menampilkan log terminal 1 baris horizontal bersih per paket tanpa emoji.
 """
 
 from collections import deque
+import csv
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import math
 import os
@@ -67,6 +73,13 @@ DEFAULT_PREAMBLE = 8
 DEFAULT_TX_POWER = 20
 
 # ============================================================
+# KONFIGURASI LOG LOKAL KOMUNIKASI LORA DI RASPBERRY PI
+# ============================================================
+
+DEFAULT_LOG_ENABLED = True
+DEFAULT_LOG_DIR = os.path.expanduser("~/blackbox2_ws/logs/communication")
+
+# ============================================================
 # KONFIGURASI DEFAULT PENGIRIMAN KE WEB (Be-smart-manekin)
 # ============================================================
 
@@ -76,9 +89,6 @@ DEFAULT_MQTT_PORT = int(os.environ.get("WEB_MQTT_PORT", "1883"))
 DEFAULT_MQTT_USERNAME = os.environ.get("WEB_MQTT_USER", "")
 DEFAULT_MQTT_PASSWORD = os.environ.get("WEB_MQTT_PASS", "")
 
-# Default deviceIdentifier sesuai seed Be-smart-manekin:
-# Mannequin 1 (MQ-01) -> AD8121DAD12451E2
-# Mannequin 2 (MQ-02) -> AD8121DAD12451E1
 DEFAULT_DEVICE_ID_M1 = "AD8121DAD12451E2"
 DEFAULT_DEVICE_ID_M2 = "AD8121DAD12451E1"
 
@@ -214,7 +224,6 @@ REVERSE_WEB_ID_MAP: Dict[int, str] = {
     rid: key for key, rid in WEB_READING_ID_MAP_M1.items()
 }
 
-# Posisi 14 titik badan SmartSkin (Piezo 1..14, FSR 1..14, MCP 1..14) sesuai seed Be-smart-manekin
 SMARTSKIN_14_LOCATIONS: Tuple[Tuple[str, int], ...] = (
     ("right arm", 1),
     ("right arm", 2),
@@ -232,7 +241,6 @@ SMARTSKIN_14_LOCATIONS: Tuple[Tuple[str, int], ...] = (
     ("left leg", 3),
 )
 
-# Posisi 16 titik sendi Flex SmartSkin (Flex 1..16) sesuai seed Be-smart-manekin
 SMARTSKIN_16_FLEX_LOCATIONS: Tuple[Tuple[str, int], ...] = (
     ("right shoulder", 1),
     ("right shoulder", 2),
@@ -252,7 +260,6 @@ SMARTSKIN_16_FLEX_LOCATIONS: Tuple[Tuple[str, int], ...] = (
     ("left knee", 2),
 )
 
-# ID Legacy Loadcell di Be-smart-manekin & Fe-Smart-manekin (801..805)
 LOADCELL_WEB_IDS: Tuple[Tuple[str, int], ...] = (
     ("loadcell_leher", 801),
     ("loadcell_paki", 802),
@@ -291,6 +298,288 @@ ALERT_DEVICE_BITS: Tuple[Tuple[int, str], ...] = (
     (4, "hx711_loadcells"),
     (5, "witmotion_wt901"),
 )
+
+
+# ============================================================
+# LOGGER CSV LOKAL KOMUNIKASI LORA (~/blackbox2_ws/logs/communication)
+# ============================================================
+
+COMMUNICATION_CSV_HEADER: List[str] = [
+    "timestamp",
+    "packet_no",
+    "mannequin_id",
+    "packet_type",
+    "payload_mode",
+    "rssi_dbm",
+    "snr_db",
+    "freq_hz",
+    "sf",
+    "bw_code",
+    "cr_code",
+    "preamble",
+    "bytes",
+    "fragments",
+    "reassembly_ms",
+    "inter_packet_ms",
+    "packet_rate_hz",
+    "crc_status",
+    "crc_hex",
+    "crc_errors_total",
+    "frag_timeouts_total",
+    "valid_fields",
+    "total_fields",
+    "web_mqtt_sent",
+    "web_ack_status",
+    "web_http_sent",
+]
+
+TELEMETRY_CSV_HEADER: List[str] = [
+    "timestamp",
+    "packet_no",
+    "mannequin_id",
+    "payload_mode",
+    "rssi_dbm",
+    "snr_db",
+    "bytes",
+    "fragments",
+    "reassembly_ms",
+    "inter_packet_ms",
+    "valid_fields",
+    *EXPECTED_KEYS,
+]
+
+ALERT_CSV_HEADER: List[str] = [
+    "timestamp",
+    "packet_no",
+    "alert_no",
+    "mannequin_id",
+    "rssi_dbm",
+    "snr_db",
+    "bytes",
+    "sequence",
+    "severity",
+    "code",
+    "system_status",
+    "offline_mask",
+    "offline_devices",
+    "raw_compact",
+]
+
+
+class LocalCommunicationLogger:
+    """
+    Menyimpan log komunikasi LoRa (RSSI, SNR, CRC, ukuran byte, fragmen, jitter,
+    packet rate) serta data 109 sensor ke file CSV lokal di Raspberry Pi.
+    """
+
+    def __init__(self, enabled: bool, log_dir: str, logger):
+        self.enabled = enabled
+        self.log_dir = os.path.expanduser(log_dir)
+        self.logger = logger
+        self._lock = threading.Lock()
+
+        self.comm_csv_path = os.path.join(self.log_dir, "lora_rx_communication.csv")
+        self.telemetry_csv_path = os.path.join(self.log_dir, "lora_rx_telemetry.csv")
+        self.alert_csv_path = os.path.join(self.log_dir, "lora_rx_alerts.csv")
+
+        self._comm_file = None
+        self._telemetry_file = None
+        self._alert_file = None
+
+        self._comm_writer = None
+        self._telemetry_writer = None
+        self._alert_writer = None
+
+        if self.enabled:
+            self._open_files()
+
+    def _open_files(self) -> None:
+        try:
+            os.makedirs(self.log_dir, exist_ok=True)
+
+            self._comm_file, self._comm_writer = self._init_csv(
+                self.comm_csv_path, COMMUNICATION_CSV_HEADER
+            )
+            self._telemetry_file, self._telemetry_writer = self._init_csv(
+                self.telemetry_csv_path, TELEMETRY_CSV_HEADER
+            )
+            self._alert_file, self._alert_writer = self._init_csv(
+                self.alert_csv_path, ALERT_CSV_HEADER
+            )
+            self.logger.info(
+                f"Local LoRa Communication CSV Logger aktif di: {self.log_dir}"
+            )
+        except Exception as exc:
+            self.enabled = False
+            self.logger.error(f"Gagal membuka file log komunikasi lokal: {exc}")
+
+    @staticmethod
+    def _init_csv(path: str, header: List[str]):
+        file_obj = open(path, "a", newline="", encoding="utf-8", buffering=1)
+        writer = csv.writer(file_obj)
+        if os.path.getsize(path) == 0:
+            writer.writerow(header)
+            file_obj.flush()
+        return file_obj, writer
+
+    @staticmethod
+    def _now_str() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    def log_communication(
+        self,
+        packet_no: int,
+        mannequin_id: int,
+        packet_type: str,
+        payload_mode: str,
+        rssi: str,
+        snr: str,
+        radio_cfg: "RadioConfig",
+        byte_len: int,
+        fragments: int,
+        reassembly_ms: float,
+        inter_packet_ms: Optional[float],
+        packet_rate_hz: Optional[float],
+        crc_status: str,
+        crc_hex: str,
+        crc_errors_total: int,
+        frag_timeouts_total: int,
+        valid_fields: int,
+        total_fields: int,
+        web_mqtt_sent: int,
+        web_ack_status: str,
+        web_http_sent: int,
+    ) -> None:
+        if not self.enabled or self._comm_writer is None:
+            return
+
+        row = [
+            self._now_str(),
+            packet_no,
+            mannequin_id,
+            packet_type,
+            payload_mode,
+            rssi,
+            snr,
+            radio_cfg.freq,
+            radio_cfg.sf,
+            radio_cfg.bw,
+            radio_cfg.cr,
+            radio_cfg.preamble,
+            byte_len,
+            fragments,
+            round(reassembly_ms, 2),
+            "" if inter_packet_ms is None else round(inter_packet_ms, 2),
+            "" if packet_rate_hz is None else round(packet_rate_hz, 3),
+            crc_status,
+            crc_hex,
+            crc_errors_total,
+            frag_timeouts_total,
+            valid_fields,
+            total_fields,
+            web_mqtt_sent,
+            web_ack_status,
+            web_http_sent,
+        ]
+        with self._lock:
+            try:
+                self._comm_writer.writerow(row)
+            except Exception as exc:
+                self.logger.warning(f"Gagal menulis lora_rx_communication.csv: {exc}")
+
+    def log_telemetry(
+        self,
+        packet_no: int,
+        mannequin_id: int,
+        payload_mode: str,
+        rssi: str,
+        snr: str,
+        byte_len: int,
+        fragments: int,
+        reassembly_ms: float,
+        inter_packet_ms: Optional[float],
+        valid_fields: int,
+        sensor_dict: Dict[str, Optional[float]],
+    ) -> None:
+        if not self.enabled or self._telemetry_writer is None:
+            return
+
+        row = [
+            self._now_str(),
+            packet_no,
+            mannequin_id,
+            payload_mode,
+            rssi,
+            snr,
+            byte_len,
+            fragments,
+            round(reassembly_ms, 2),
+            "" if inter_packet_ms is None else round(inter_packet_ms, 2),
+            valid_fields,
+            *[
+                "" if sensor_dict.get(k) is None else sensor_dict.get(k)
+                for k in EXPECTED_KEYS
+            ],
+        ]
+        with self._lock:
+            try:
+                self._telemetry_writer.writerow(row)
+            except Exception as exc:
+                self.logger.warning(f"Gagal menulis lora_rx_telemetry.csv: {exc}")
+
+    def log_alert(
+        self,
+        packet_no: int,
+        alert_no: int,
+        mannequin_id: int,
+        rssi: str,
+        snr: str,
+        byte_len: int,
+        decoded_alert: Dict[str, object],
+    ) -> None:
+        if not self.enabled or self._alert_writer is None:
+            return
+
+        offline_devs = decoded_alert.get("offline_devices", [])
+        offline_str = (
+            ";".join(str(x) for x in offline_devs)
+            if isinstance(offline_devs, list)
+            else str(offline_devs)
+        )
+        row = [
+            self._now_str(),
+            packet_no,
+            alert_no,
+            mannequin_id,
+            rssi,
+            snr,
+            byte_len,
+            decoded_alert.get("sequence", ""),
+            decoded_alert.get("severity", ""),
+            decoded_alert.get("code", ""),
+            decoded_alert.get("status", ""),
+            decoded_alert.get("device_mask", ""),
+            offline_str,
+            decoded_alert.get("raw_compact", ""),
+        ]
+        with self._lock:
+            try:
+                self._alert_writer.writerow(row)
+            except Exception as exc:
+                self.logger.warning(f"Gagal menulis lora_rx_alerts.csv: {exc}")
+
+    def close(self) -> None:
+        with self._lock:
+            for f in (self._comm_file, self._telemetry_file, self._alert_file):
+                if f is not None:
+                    try:
+                        f.flush()
+                        f.close()
+                    except Exception:
+                        pass
+            self._comm_file = None
+            self._telemetry_file = None
+            self._alert_file = None
 
 
 # ============================================================
@@ -346,7 +635,6 @@ class SimpleSocketMqttClient:
         sock = socket.create_connection((self.host, self.port), timeout=3.0)
         sock.settimeout(2.0)
 
-        # Variable header: Protocol Name "MQTT", Level 4 (v3.1.1), Flags, Keepalive
         connect_flags = 0x02  # Clean Session
         payload = _encode_mqtt_utf8(self.client_id)
         if self.username:
@@ -574,7 +862,6 @@ class WebTelemetryForwarder:
         web_v2_obj: Dict[str, object],
         sensor_dict: Dict[str, Optional[float]],
     ) -> None:
-        """Memasukkan paket telemetry ke antrean pengiriman web tanpa memblokir serial RX."""
         if not self.config.mqtt_enabled and not self.config.http_enabled:
             return
         with self._cond:
@@ -582,7 +869,6 @@ class WebTelemetryForwarder:
             self._cond.notify()
 
     def enqueue_alert(self, mannequin_id: int, alert_payload: Dict[str, object]) -> None:
-        """Memasukkan paket alert ke antrean pengiriman web."""
         if not self.config.mqtt_enabled and not self.config.http_enabled:
             return
         with self._cond:
@@ -618,8 +904,6 @@ class WebTelemetryForwarder:
     def _send_mqtt_telemetry(
         self, device_id: str, web_v2_obj: Dict[str, object]
     ) -> None:
-        # Filter hanya readingId yang nilainya tidak None jika ada nilai valid,
-        # atau kirim seluruh tuple sesuai kontrak Compact Telemetry v2 Be-smart-manekin.
         raw_readings = web_v2_obj.get("r", [])
         if isinstance(raw_readings, list):
             non_null = [
@@ -701,14 +985,8 @@ class WebTelemetryForwarder:
     def _send_http_telemetry(
         self, mannequin_id: int, d: Dict[str, Optional[float]]
     ) -> None:
-        """
-        Mengirim data sensor ke endpoint HTTP REST Be-smart-manekin:
-          1. POST /sensor-reading/batch (SmartSkin 59 kanal: Piezo, FSR, MCP, Flex, Thermal)
-          2. POST /sensor/{lidar,mq,adxl,bme,loadcell,witsensor,ky}
-        """
         ok_any = False
 
-        # 1. SmartSkin Batch (/sensor-reading/batch)
         readings: List[Dict[str, object]] = []
         for idx, (loc, pt) in enumerate(SMARTSKIN_14_LOCATIONS, start=1):
             v_piezo = d.get(f"piezo{idx}")
@@ -766,7 +1044,6 @@ class WebTelemetryForwarder:
             ):
                 ok_any = True
 
-        # 2. Sensor Diskrit Kompatibilitas (/sensor/*)
         if d.get("lidar_raw") is not None or d.get("lidar_median") is not None:
             lidar_body = {"sensor_id": 901}
             if d.get("lidar_raw") is not None:
@@ -902,7 +1179,6 @@ class RadioConfig:
     tx_power: int = DEFAULT_TX_POWER
 
     def p2p_command(self, bw_override: Optional[int] = None) -> str:
-        """Membentuk perintah AT+P2P sesuai spesifikasi RAK RUI3."""
         bw = self.bw if bw_override is None else bw_override
         return (
             f"AT+P2P={self.freq}:{self.sf}:{bw}:"
@@ -911,7 +1187,6 @@ class RadioConfig:
 
 
 def declare_radio_config(node: Node, default_port: str) -> RadioConfig:
-    """Mendeklarasikan parameter ROS2 radio LoRa dan mengembalikan RadioConfig."""
     node.declare_parameter("port", default_port)
     node.declare_parameter("baudrate", DEFAULT_BAUDRATE)
     node.declare_parameter("freq", DEFAULT_FREQUENCY)
@@ -934,7 +1209,6 @@ def declare_radio_config(node: Node, default_port: str) -> RadioConfig:
 
 
 def declare_web_config(node: Node) -> WebForwarderConfig:
-    """Mendeklarasikan parameter ROS2 untuk koneksi pengiriman langsung ke Web."""
     node.declare_parameter("mqtt_enabled", DEFAULT_MQTT_ENABLED)
     node.declare_parameter("mqtt_host", DEFAULT_MQTT_HOST)
     node.declare_parameter("mqtt_port", DEFAULT_MQTT_PORT)
@@ -986,7 +1260,6 @@ class RakP2PReceiver:
         return self.config.port
 
     def connect(self) -> bool:
-        """Membuka port serial dan menjalankan urutan konfigurasi RX RAK3272S."""
         chosen_port = self._select_port()
         try:
             self.serial_port = serial.Serial(
@@ -1009,7 +1282,6 @@ class RakP2PReceiver:
             return False
 
     def reconnect_if_due(self, cooldown: float = 3.0) -> bool:
-        """Mencoba menyambung ulang port serial bila cooldown sudah tercapai."""
         now = time.monotonic()
         if now - self._last_reconnect_try < cooldown:
             return False
@@ -1019,7 +1291,6 @@ class RakP2PReceiver:
         return self.connect()
 
     def send_at(self, command: str, timeout: float = 2.0) -> bool:
-        """Mengirim perintah AT dan menunggu respon OK atau ERROR."""
         if not self.is_connected:
             return False
 
@@ -1049,7 +1320,6 @@ class RakP2PReceiver:
             return False
 
     def configure(self) -> None:
-        """Mengatur mode P2P (NWM=0), parameter AT+P2P, dan continuous RX."""
         if not self.is_connected:
             return
 
@@ -1059,7 +1329,6 @@ class RakP2PReceiver:
         self.send_at("AT+PRECV=0", timeout=1.0)
 
         if not self.send_at(self.config.p2p_command(), timeout=2.0) and self.config.bw == 2:
-            # Beberapa firmware RUI3 memakai nilai kHz (500) alih-alih indeks 2
             self.send_at(self.config.p2p_command(bw_override=500), timeout=2.0)
 
         if not self.send_at("AT+PRECV=65534", timeout=2.0):
@@ -1076,14 +1345,12 @@ class RakP2PReceiver:
         res_nwm = self.serial_port.read_all().decode(errors="ignore")
 
         if "=0" not in res_nwm:
-            # Perpindahan LoRaWAN -> P2P me-reboot modul RAK3272S selama ~1.5-2 detik
             self.logger.info("Mengubah RAK ke mode LoRa P2P (AT+NWM=0)...")
             self.send_at("AT+NWM=0", timeout=2.0)
             time.sleep(2.0)
             self.send_at("AT", timeout=1.0)
 
     def read_lines(self) -> List[str]:
-        """Membaca data serial yang tersedia dan mengembalikan daftar baris utuh."""
         if not self.is_connected:
             return []
 
@@ -1107,7 +1374,6 @@ class RakP2PReceiver:
         return lines
 
     def close(self, stop_rx: bool = True) -> None:
-        """Menutup koneksi serial secara aman."""
         if self.serial_port is None:
             return
         if self.serial_port.is_open:
@@ -1129,7 +1395,6 @@ class RakP2PReceiver:
 # ============================================================
 
 def crc16_ccitt(data: bytes) -> int:
-    """Menghitung checksum CRC16-CCITT (polynomial 0x1021, init 0xFFFF)."""
     crc = 0xFFFF
     for byte in data:
         crc ^= byte << 8
@@ -1142,7 +1407,6 @@ def crc16_ccitt(data: bytes) -> int:
 
 
 def valid_number(value) -> Optional[float]:
-    """Mengonversi input ke float hingga; mengembalikan None bila invalid/null."""
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -1153,7 +1417,6 @@ def valid_number(value) -> Optional[float]:
 
 
 def publish_json(publisher, payload: object, compact: bool = False) -> None:
-    """Mengemas object Python menjadi std_msgs/String JSON lalu mempublikasikannya."""
     msg = String()
     if compact:
         msg.data = json.dumps(payload, separators=(",", ":"), allow_nan=False)
@@ -1163,7 +1426,6 @@ def publish_json(publisher, payload: object, compact: bool = False) -> None:
 
 
 def parse_rx_event(line: str) -> Optional[Tuple[str, str, str]]:
-    """Mengekstrak (rssi, snr, hex_str) dari baris event +EVT:RXP2P RAK RUI3."""
     if "RXP2P" not in line:
         return None
 
@@ -1197,7 +1459,6 @@ class FragmentAssembler:
         self._start_time: float = 0.0
 
     def add_fragment(self, raw_bytes: bytes) -> Optional[Tuple[bytes, int, float]]:
-        """Menambahkan fragmen FRG; mengembalikan (complete_data, total, elapsed_ms) jika utuh."""
         meta, chunk = raw_bytes[4:].split(b":", 1)
         idx_str, tot_str = meta.decode("ascii").split("/")
         idx, total = int(idx_str), int(tot_str)
@@ -1219,7 +1480,6 @@ class FragmentAssembler:
         return complete_data, completed_total, elapsed_ms
 
     def expire_if_stale(self) -> Optional[Tuple[int, int]]:
-        """Membersihkan fragmen menggantung bila melewati batas timeout."""
         if not self._chunks:
             return None
         if (time.monotonic() - self._start_time) <= self.timeout_sec:
@@ -1233,35 +1493,35 @@ class FragmentAssembler:
         self._total = 0
 
 
-def split_and_verify_crc(complete_data: bytes) -> bytes:
+def split_and_verify_crc(complete_data: bytes) -> Tuple[bytes, str]:
     """
-    Memeriksa akhiran CRC16-CCITT (*XXXX) bila tersedia dan mengembalikan payload bersih.
+    Memeriksa akhiran CRC16-CCITT (*XXXX) bila tersedia dan mengembalikan (payload_bytes, crc_hex).
 
     Melempar ValueError jika checksum *XXXX ada tetapi tidak cocok.
     """
     if b"*" not in complete_data:
-        return complete_data
+        return complete_data, "NONE"
 
     candidate_body, crc_bytes = complete_data.rsplit(b"*", 1)
     crc_text = crc_bytes.strip()
     if len(crc_text) != 4:
-        return complete_data
+        return complete_data, "NONE"
 
     try:
-        expected_crc = int(crc_text.decode("ascii"), 16)
+        crc_hex = crc_text.decode("ascii").upper()
+        expected_crc = int(crc_hex, 16)
     except (ValueError, UnicodeDecodeError):
-        return complete_data
+        return complete_data, "NONE"
 
     actual_crc = crc16_ccitt(candidate_body)
     if actual_crc != expected_crc:
         raise ValueError(
             f"CRC16 mismatch (dihitung {actual_crc:04X}, diterima {expected_crc:04X})"
         )
-    return candidate_body
+    return candidate_body, crc_hex
 
 
 def decode_compact_alert(text: str) -> Dict[str, object]:
-    """Mendekode alert kompak 12-byte A1<seq:4X><sev:1X><event:2X><status:1X><mask:2X>."""
     if len(text) != 12 or not text.startswith("A1"):
         raise ValueError(f"Format alert kompak tidak valid: {text!r}")
 
@@ -1292,7 +1552,6 @@ def decode_compact_alert(text: str) -> Dict[str, object]:
 def decode_array_telemetry(
     values: list,
 ) -> Tuple[Dict[str, Optional[float]], Optional[str]]:
-    """Memetakan list angka/null dari lora_txManekin1.py ke dictionary 109 parameter."""
     warning_msg: Optional[str] = None
     if len(values) != NUM_PARAMS:
         warning_msg = (
@@ -1310,7 +1569,6 @@ def decode_array_telemetry(
 def decode_web_v2_telemetry(
     payload_obj: dict, default_mannequin_id: int
 ) -> Tuple[int, Dict[str, Optional[float]]]:
-    """Memetakan payload JSON Web Compact V2 {"v":2,"r":[[id,val],...]} ke 109 key."""
     sensor_dict: Dict[str, Optional[float]] = {key: None for key in EXPECTED_KEYS}
     readings = payload_obj.get("r", [])
 
@@ -1348,7 +1606,6 @@ def build_web_v2_payload(
     boot_count: int,
     seq: int,
 ) -> Dict[str, object]:
-    """Membangun JSON Web Compact V2 yang identik dengan build_web_v2_packet() TX."""
     id_offset = 1000 if mannequin_id == 2 else 0
     readings = [
         [base_id + id_offset, sensor_dict.get(key)]
@@ -1364,7 +1621,6 @@ def build_web_v2_payload(
 
 
 def format_manekin_horizontal(d: Dict[str, Optional[float]]) -> str:
-    """Memformat seluruh 109 parameter telemetry lora_txManekin1.py menjadi 1 baris."""
     def val(k: str) -> object:
         v = d.get(k)
         return "-" if v is None else v
@@ -1405,33 +1661,46 @@ def format_manekin_horizontal(d: Dict[str, Optional[float]]) -> str:
 
 
 # ============================================================
-# NODE ROS2 RECEIVER MANEKIN 1 (+ WEB FORWARDER)
+# NODE ROS2 RECEIVER MANEKIN 1 (+ WEB FORWARDER + LOCAL LOGGER)
 # ============================================================
 
 class LoRaManekin1ReceiverNode(Node):
-    """Node ROS2 receiver LoRa P2P standalone yang langsung meneruskan data ke Web."""
+    """Node ROS2 receiver LoRa P2P standalone + Web Forwarder + Local CSV Communication Logger."""
 
     def __init__(self, default_port: str = DEFAULT_SERIAL_PORT):
         super().__init__("lora_rx_manekin1_node")
 
-        radio_config = declare_radio_config(self, default_port)
+        self.radio_config = declare_radio_config(self, default_port)
         web_config = declare_web_config(self)
 
         self.declare_parameter("frag_timeout", 3.0)
         self.declare_parameter("mannequin_id", 1)
         self.declare_parameter("boot_count", 1)
+        self.declare_parameter("log_enabled", DEFAULT_LOG_ENABLED)
+        self.declare_parameter("log_dir", DEFAULT_LOG_DIR)
 
         frag_timeout = float(self.get_parameter("frag_timeout").value)
         self.default_mannequin_id = int(self.get_parameter("mannequin_id").value)
         self.boot_count = int(self.get_parameter("boot_count").value)
+        log_enabled = bool(self.get_parameter("log_enabled").value)
+        log_dir = str(self.get_parameter("log_dir").value)
 
         self.packet_count = 0
         self.alert_count = 0
         self.crc_error_count = 0
+        self.frag_timeout_count = 0
         self.web_seq = 0
         self.last_rssi = "-"
         self.last_snr = "-"
+        self.last_packet_monotonic: Optional[float] = None
         self.assembler = FragmentAssembler(frag_timeout)
+
+        # Logger CSV Lokal di ~/blackbox2_ws/logs/communication/
+        self.comm_logger = LocalCommunicationLogger(
+            enabled=log_enabled,
+            log_dir=log_dir,
+            logger=self.get_logger(),
+        )
 
         # Publisher utama ROS 2 (Web Compact V2, Alerts, Status, Raw, dan 9 group sensor)
         self.web_v2_pub = self.create_publisher(String, "/telemetri/web/v2", 10)
@@ -1450,7 +1719,7 @@ class LoRaManekin1ReceiverNode(Node):
         )
 
         self.radio = RakP2PReceiver(
-            config=radio_config,
+            config=self.radio_config,
             fallback_ports=FALLBACK_PORTS,
             logger=self.get_logger(),
         )
@@ -1462,15 +1731,24 @@ class LoRaManekin1ReceiverNode(Node):
         active_dev_id = web_config.resolve_device_id(self.default_mannequin_id)
         self.get_logger().info(
             f"LoRa Manekin Receiver started on {self.radio.active_port} "
-            f"@ {radio_config.baudrate} | Freq:{radio_config.freq} SF{radio_config.sf} "
-            f"BW{radio_config.bw} CR{radio_config.cr} | {NUM_PARAMS} params | "
-            f"WebMQTT:{web_config.mqtt_enabled} ({web_config.mqtt_host}:{web_config.mqtt_port} "
-            f"topic=smart-mannequin/{active_dev_id}/telemetry) | "
-            f"WebHTTP:{web_config.http_enabled} ({web_config.http_base_url})"
+            f"@ {self.radio_config.baudrate} | Freq:{self.radio_config.freq} SF{self.radio_config.sf} "
+            f"BW{self.radio_config.bw} CR{self.radio_config.cr} | {NUM_PARAMS} params | "
+            f"LocalLog:{self.comm_logger.log_dir} | "
+            f"WebMQTT:{web_config.mqtt_enabled} (topic=smart-mannequin/{active_dev_id}/telemetry)"
         )
 
+    def _compute_inter_packet_timing(self) -> Tuple[Optional[float], Optional[float]]:
+        now = time.monotonic()
+        if self.last_packet_monotonic is None:
+            self.last_packet_monotonic = now
+            return None, None
+        delta_sec = now - self.last_packet_monotonic
+        self.last_packet_monotonic = now
+        inter_ms = delta_sec * 1000.0
+        rate_hz = (1.0 / delta_sec) if delta_sec > 0 else None
+        return inter_ms, rate_hz
+
     def read_serial_data(self) -> None:
-        """Membaca event +EVT:RXP2P dari RAK3272S melalui serial."""
         if not self.radio.is_connected:
             self.radio.reconnect_if_due()
             return
@@ -1495,7 +1773,6 @@ class LoRaManekin1ReceiverNode(Node):
             self.handle_received_bytes(raw_bytes, rssi, snr)
 
     def handle_received_bytes(self, raw_bytes: bytes, rssi: str, snr: str) -> None:
-        """Membuka framing FRG (bila ada) dan meneruskan payload utuh ke decoder."""
         self.last_rssi = rssi or "-"
         self.last_snr = snr or "-"
 
@@ -1515,13 +1792,36 @@ class LoRaManekin1ReceiverNode(Node):
     def process_complete_data(
         self, complete_data: bytes, total_frags: int, elapsed_ms: float
     ) -> None:
-        """Memverifikasi CRC16-CCITT dan merutekan Alert, Array JSON, atau Web V2 JSON."""
         self.packet_count += 1
+        inter_ms, rate_hz = self._compute_inter_packet_timing()
 
         try:
-            payload_bytes = split_and_verify_crc(complete_data)
+            payload_bytes, crc_hex = split_and_verify_crc(complete_data)
         except ValueError as exc:
             self.crc_error_count += 1
+            self.comm_logger.log_communication(
+                packet_no=self.packet_count,
+                mannequin_id=self.default_mannequin_id,
+                packet_type="crc_error",
+                payload_mode="invalid_crc",
+                rssi=self.last_rssi,
+                snr=self.last_snr,
+                radio_cfg=self.radio_config,
+                byte_len=len(complete_data),
+                fragments=total_frags,
+                reassembly_ms=elapsed_ms,
+                inter_packet_ms=inter_ms,
+                packet_rate_hz=rate_hz,
+                crc_status="CRC_ERROR",
+                crc_hex="MISMATCH",
+                crc_errors_total=self.crc_error_count,
+                frag_timeouts_total=self.frag_timeout_count,
+                valid_fields=0,
+                total_fields=NUM_PARAMS,
+                web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
+                web_ack_status=self.web_forwarder.last_ack_status,
+                web_http_sent=self.web_forwarder.http_sent_count,
+            )
             self.get_logger().warning(
                 f"[RX #{self.packet_count:04d}] {exc}. Paket dibuang."
             )
@@ -1536,13 +1836,24 @@ class LoRaManekin1ReceiverNode(Node):
             return
 
         if text.startswith("A1") and len(text) == 12:
-            self._handle_alert(text, len(complete_data), total_frags, elapsed_ms)
+            self._handle_alert(
+                text, len(complete_data), total_frags, elapsed_ms, inter_ms, rate_hz, crc_hex
+            )
             return
 
-        self._handle_json_payload(text, len(complete_data), total_frags, elapsed_ms)
+        self._handle_json_payload(
+            text, len(complete_data), total_frags, elapsed_ms, inter_ms, rate_hz, crc_hex
+        )
 
     def _handle_alert(
-        self, text: str, byte_len: int, total_frags: int, elapsed_ms: float
+        self,
+        text: str,
+        byte_len: int,
+        total_frags: int,
+        elapsed_ms: float,
+        inter_ms: Optional[float],
+        rate_hz: Optional[float],
+        crc_hex: str,
     ) -> None:
         try:
             decoded = decode_compact_alert(text)
@@ -1573,12 +1884,48 @@ class LoRaManekin1ReceiverNode(Node):
         publish_json(self.alert_pub, alert_payload)
         self.web_forwarder.enqueue_alert(self.default_mannequin_id, alert_payload)
 
+        # Simpan ke CSV komunikasi & CSV alert lokal
+        self.comm_logger.log_communication(
+            packet_no=self.packet_count,
+            mannequin_id=self.default_mannequin_id,
+            packet_type="alert",
+            payload_mode="alert",
+            rssi=self.last_rssi,
+            snr=self.last_snr,
+            radio_cfg=self.radio_config,
+            byte_len=byte_len,
+            fragments=total_frags,
+            reassembly_ms=elapsed_ms,
+            inter_packet_ms=inter_ms,
+            packet_rate_hz=rate_hz,
+            crc_status="OK",
+            crc_hex=crc_hex,
+            crc_errors_total=self.crc_error_count,
+            frag_timeouts_total=self.frag_timeout_count,
+            valid_fields=0,
+            total_fields=NUM_PARAMS,
+            web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
+            web_ack_status=self.web_forwarder.last_ack_status,
+            web_http_sent=self.web_forwarder.http_sent_count,
+        )
+        self.comm_logger.log_alert(
+            packet_no=self.packet_count,
+            alert_no=self.alert_count,
+            mannequin_id=self.default_mannequin_id,
+            rssi=self.last_rssi,
+            snr=self.last_snr,
+            byte_len=byte_len,
+            decoded_alert=decoded,
+        )
+
         self._publish_radio_status(
             mannequin_id=self.default_mannequin_id,
             valid_fields=0,
             byte_len=byte_len,
             total_frags=total_frags,
             elapsed_ms=elapsed_ms,
+            inter_ms=inter_ms,
+            rate_hz=rate_hz,
             payload_mode="alert",
         )
 
@@ -1591,7 +1938,14 @@ class LoRaManekin1ReceiverNode(Node):
         )
 
     def _handle_json_payload(
-        self, text: str, byte_len: int, total_frags: int, elapsed_ms: float
+        self,
+        text: str,
+        byte_len: int,
+        total_frags: int,
+        elapsed_ms: float,
+        inter_ms: Optional[float],
+        rate_hz: Optional[float],
+        crc_hex: str,
     ) -> None:
         try:
             parsed = json.loads(text)
@@ -1634,6 +1988,9 @@ class LoRaManekin1ReceiverNode(Node):
             byte_len=byte_len,
             total_frags=total_frags,
             elapsed_ms=elapsed_ms,
+            inter_ms=inter_ms,
+            rate_hz=rate_hz,
+            crc_hex=crc_hex,
             web_v2_obj=web_v2_obj,
         )
 
@@ -1644,6 +2001,8 @@ class LoRaManekin1ReceiverNode(Node):
         byte_len: int,
         total_frags: int,
         elapsed_ms: float,
+        inter_ms: Optional[float],
+        rate_hz: Optional[float],
         payload_mode: str,
     ) -> None:
         status_obj = {
@@ -1655,9 +2014,16 @@ class LoRaManekin1ReceiverNode(Node):
             "fragments": total_frags,
             "rssi": self.last_rssi,
             "snr": self.last_snr,
+            "freq_hz": self.radio_config.freq,
+            "sf": self.radio_config.sf,
+            "bw": self.radio_config.bw,
+            "cr": self.radio_config.cr,
             "elapsed_ms": round(elapsed_ms, 1),
+            "inter_packet_ms": None if inter_ms is None else round(inter_ms, 1),
+            "packet_rate_hz": None if rate_hz is None else round(rate_hz, 3),
             "payload_mode": payload_mode,
             "crc_errors": self.crc_error_count,
+            "frag_timeouts": self.frag_timeout_count,
             "web_mqtt_sent": self.web_forwarder.mqtt_sent_count,
             "web_mqtt_acks": self.web_forwarder.mqtt_ack_count,
             "web_mqtt_last_ack": self.web_forwarder.last_ack_status,
@@ -1673,6 +2039,9 @@ class LoRaManekin1ReceiverNode(Node):
         byte_len: int,
         total_frags: int,
         elapsed_ms: float,
+        inter_ms: Optional[float],
+        rate_hz: Optional[float],
+        crc_hex: str,
         web_v2_obj: Optional[Dict[str, object]] = None,
     ) -> None:
         valid_fields = sum(1 for v in sensor_dict.values() if v is not None)
@@ -1696,12 +2065,50 @@ class LoRaManekin1ReceiverNode(Node):
             sensor_dict=sensor_dict,
         )
 
-        # 3. Topic ROS 2 per kelompok sensor (/telemetri/arduino .. /telemetri/witmotion)
+        # 3. SIMPAN LOKAL DI RASPBERRY PI (~/blackbox2_ws/logs/communication/)
+        self.comm_logger.log_communication(
+            packet_no=self.packet_count,
+            mannequin_id=mannequin_id,
+            packet_type="telemetry",
+            payload_mode=payload_mode,
+            rssi=self.last_rssi,
+            snr=self.last_snr,
+            radio_cfg=self.radio_config,
+            byte_len=byte_len,
+            fragments=total_frags,
+            reassembly_ms=elapsed_ms,
+            inter_packet_ms=inter_ms,
+            packet_rate_hz=rate_hz,
+            crc_status="OK",
+            crc_hex=crc_hex,
+            crc_errors_total=self.crc_error_count,
+            frag_timeouts_total=self.frag_timeout_count,
+            valid_fields=valid_fields,
+            total_fields=NUM_PARAMS,
+            web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
+            web_ack_status=self.web_forwarder.last_ack_status,
+            web_http_sent=self.web_forwarder.http_sent_count,
+        )
+        self.comm_logger.log_telemetry(
+            packet_no=self.packet_count,
+            mannequin_id=mannequin_id,
+            payload_mode=payload_mode,
+            rssi=self.last_rssi,
+            snr=self.last_snr,
+            byte_len=byte_len,
+            fragments=total_frags,
+            reassembly_ms=elapsed_ms,
+            inter_packet_ms=inter_ms,
+            valid_fields=valid_fields,
+            sensor_dict=sensor_dict,
+        )
+
+        # 4. Topic ROS 2 per kelompok sensor (/telemetri/arduino .. /telemetri/witmotion)
         for group_name, group_keys in SENSOR_GROUPS.items():
             group_payload = {key: sensor_dict[key] for key in group_keys}
             publish_json(self.group_pubs[group_name], group_payload)
 
-        # 4. Topic gabungan & status radio
+        # 5. Topic gabungan & status radio
         raw_payload = {
             "mannequin_id": mannequin_id,
             "payload_mode": payload_mode,
@@ -1716,10 +2123,12 @@ class LoRaManekin1ReceiverNode(Node):
             byte_len=byte_len,
             total_frags=total_frags,
             elapsed_ms=elapsed_ms,
+            inter_ms=inter_ms,
+            rate_hz=rate_hz,
             payload_mode=payload_mode,
         )
 
-        # 5. Log 1 baris horizontal bersih
+        # 6. Log 1 baris horizontal bersih
         pkt_label = "1Paket" if total_frags == 1 else f"{total_frags}Frg"
         web_info = (
             f"MQTT:{self.web_forwarder.mqtt_sent_count}"
@@ -1739,6 +2148,30 @@ class LoRaManekin1ReceiverNode(Node):
         dropped = self.assembler.expire_if_stale()
         if dropped is not None:
             received, total = dropped
+            self.frag_timeout_count += 1
+            self.comm_logger.log_communication(
+                packet_no=self.packet_count,
+                mannequin_id=self.default_mannequin_id,
+                packet_type="frag_timeout",
+                payload_mode=f"incomplete_{received}_of_{total}",
+                rssi=self.last_rssi,
+                snr=self.last_snr,
+                radio_cfg=self.radio_config,
+                byte_len=0,
+                fragments=received,
+                reassembly_ms=self.assembler.timeout_sec * 1000.0,
+                inter_packet_ms=None,
+                packet_rate_hz=None,
+                crc_status="FRAG_TIMEOUT",
+                crc_hex="NONE",
+                crc_errors_total=self.crc_error_count,
+                frag_timeouts_total=self.frag_timeout_count,
+                valid_fields=0,
+                total_fields=NUM_PARAMS,
+                web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
+                web_ack_status=self.web_forwarder.last_ack_status,
+                web_http_sent=self.web_forwarder.http_sent_count,
+            )
             self.get_logger().warning(
                 f"Fragmen tidak lengkap dalam {self.assembler.timeout_sec}s "
                 f"({received}/{total}), dibatalkan."
@@ -1746,12 +2179,12 @@ class LoRaManekin1ReceiverNode(Node):
 
     def destroy_node(self) -> None:
         self.web_forwarder.close()
+        self.comm_logger.close()
         self.radio.close(stop_rx=True)
         super().destroy_node()
 
 
 def parse_cli_args(argv: Optional[List[str]] = None) -> Tuple[str, List[str]]:
-    """Memisahkan argumen serial port (/dev/...) sebelum diteruskan ke rclpy."""
     args = sys.argv if argv is None else argv
     cli_port = DEFAULT_SERIAL_PORT
     filtered = [args[0]]
