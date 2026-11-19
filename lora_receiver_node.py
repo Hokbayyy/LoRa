@@ -10,8 +10,7 @@ Pasangan persis dari lora_transmitter_node.py:
 """
 
 import json
-import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import serial
 
@@ -25,70 +24,19 @@ from lora_common import (
     PACKET_MAGIC,
     PACKET_SIZE_MULTINODE,
     SENSOR_GROUPS,
+    FragmentAssembler,
     RakP2PRadio,
     crc16_ccitt,
     declare_radio_config,
     decode_p99_packet,
     format_horizontal,
     parse_rx_event,
+    publish_json,
 )
 
 
 DEFAULT_SERIAL_PORT = "/dev/ttyAMA0"
 FALLBACK_PORTS = ("/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0")
-
-
-def publish_json(publisher, payload: object) -> None:
-    """Mengemas object Python ke std_msgs/String JSON dan mempublikasikannya."""
-    msg = String()
-    msg.data = json.dumps(payload)
-    publisher.publish(msg)
-
-
-class FragmentAssembler:
-    """Menangani reassembly paket legacy berheader FRG:index/total secara aman."""
-
-    def __init__(self, timeout_sec: float):
-        self.timeout_sec = timeout_sec
-        self._chunks: Dict[int, bytes] = {}
-        self._total: int = 0
-        self._start_time: float = 0.0
-
-    def add_fragment(self, raw_bytes: bytes) -> Optional[Tuple[bytes, int, float]]:
-        """Menambahkan fragmen FRG; mengembalikan (complete_data, total, elapsed_ms) jika utuh."""
-        meta, chunk = raw_bytes[4:].split(b":", 1)
-        idx_str, tot_str = meta.decode("ascii").split("/")
-        idx, total = int(idx_str), int(tot_str)
-        now = time.monotonic()
-
-        if idx == 1 or total != self._total:
-            self._chunks.clear()
-            self._total = total
-            self._start_time = now
-
-        self._chunks[idx] = chunk
-        if len(self._chunks) < self._total:
-            return None
-
-        complete_data = b"".join(self._chunks[i] for i in range(1, self._total + 1))
-        elapsed_ms = (now - self._start_time) * 1000.0
-        completed_total = self._total
-        self.reset()
-        return complete_data, completed_total, elapsed_ms
-
-    def expire_if_stale(self) -> Optional[Tuple[int, int]]:
-        """Membersihkan fragmen menggantung bila melewati batas timeout."""
-        if not self._chunks:
-            return None
-        if (time.monotonic() - self._start_time) <= self.timeout_sec:
-            return None
-        dropped = (len(self._chunks), self._total)
-        self.reset()
-        return dropped
-
-    def reset(self) -> None:
-        self._chunks.clear()
-        self._total = 0
 
 
 class LoRaReceiverNode(Node):

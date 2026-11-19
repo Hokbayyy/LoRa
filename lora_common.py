@@ -8,6 +8,7 @@ serta driver serial RAK3272S agar tidak terjadi duplikasi kode antara TX dan RX.
 """
 
 from dataclasses import dataclass
+import json
 import math
 import os
 import struct
@@ -536,3 +537,65 @@ class RakP2PRadio:
             except Exception:
                 pass
         self.serial_port = None
+
+
+# ============================================================
+# UTILITAS ROS2 & FRAGMENT REASSEMBLY BERSAMA
+# ============================================================
+
+def publish_json(publisher, payload: object, compact: bool = False) -> None:
+    """Mengemas object Python ke std_msgs/String JSON dan mempublikasikannya."""
+    from std_msgs.msg import String
+
+    msg = String()
+    if compact:
+        msg.data = json.dumps(payload, separators=(",", ":"), allow_nan=False)
+    else:
+        msg.data = json.dumps(payload)
+    publisher.publish(msg)
+
+
+class FragmentAssembler:
+    """Menangani reassembly paket berheader FRG:index/total secara aman."""
+
+    def __init__(self, timeout_sec: float):
+        self.timeout_sec = timeout_sec
+        self._chunks: Dict[int, bytes] = {}
+        self._total: int = 0
+        self._start_time: float = 0.0
+
+    def add_fragment(self, raw_bytes: bytes) -> Optional[Tuple[bytes, int, float]]:
+        """Menambahkan fragmen FRG; mengembalikan (complete_data, total, elapsed_ms) jika utuh."""
+        meta, chunk = raw_bytes[4:].split(b":", 1)
+        idx_str, tot_str = meta.decode("ascii").split("/")
+        idx, total = int(idx_str), int(tot_str)
+        now = time.monotonic()
+
+        if idx == 1 or total != self._total:
+            self._chunks.clear()
+            self._total = total
+            self._start_time = now
+
+        self._chunks[idx] = chunk
+        if len(self._chunks) < self._total:
+            return None
+
+        complete_data = b"".join(self._chunks[i] for i in range(1, self._total + 1))
+        elapsed_ms = (now - self._start_time) * 1000.0
+        completed_total = self._total
+        self.reset()
+        return complete_data, completed_total, elapsed_ms
+
+    def expire_if_stale(self) -> Optional[Tuple[int, int]]:
+        """Membersihkan fragmen menggantung bila melewati batas timeout."""
+        if not self._chunks:
+            return None
+        if (time.monotonic() - self._start_time) <= self.timeout_sec:
+            return None
+        dropped = (len(self._chunks), self._total)
+        self.reset()
+        return dropped
+
+    def reset(self) -> None:
+        self._chunks.clear()
+        self._total = 0
